@@ -145,7 +145,6 @@ GAMES = {
     "블피":   {"key":"blox_fruits",   "universeId":994732206},
 }
 
-# key ↔ 표시명 매핑
 KEY_TO_NAME = {
     "grow_a_garden": "그어가",
     "adopt_me": "입양",
@@ -159,7 +158,7 @@ KEY_TO_NAME = {
 SUPPORTED_TEXT_EXT = {".txt", ".log", ".csv", ".json"}
 SUPPORTED_ARCHIVE_EXT = {".zip"}
 
-ORDER_TOKEN_RE = re.compile(r"(_?\|WARNING[^\s\"';]+)")
+ORDER_TOKEN_RE = re.compile(r"(_?\|WARNING[^\s\"';]+)")  # _|WARNING / |WARNING
 BACKUP_PATTERNS = [
     re.compile(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s\"';]+)"),
     re.compile(r"(?i)\"ROBLOSECURITY\"\s*:\s*\"([^\"]+)\""),
@@ -171,8 +170,10 @@ def _clean_token(v: str) -> str:
 
 def extract_tokens_from_text(text: str) -> list[str]:
     out = []
+    # WARNING 우선(같은 라인 2회 등장도 전부 캐치) — Order 예시 패턴 기준 [[1]](about:blank) [[2]](about:blank) [[3]](about:blank) [[4]](about:blank) [[5]](about:blank)
     for m in ORDER_TOKEN_RE.finditer(text or ""):
         out.append(_clean_token(m.group(1)))
+    # 백업 패턴(.ROBLOSECURITY/헤더/JSON) — 내부에 WARNING 있으면 그 지점부터 재슬라이스
     for rgx in BACKUP_PATTERNS:
         for m in rgx.finditer(text or ""):
             raw = _clean_token(m.group(1))
@@ -189,6 +190,9 @@ def parse_cookies_blob(raw_text: str) -> list[tuple[str, str]]:
     for tok in tokens:
         tok = _clean_token(tok)
         if not tok or any(ch.isspace() for ch in tok):
+            continue
+        # (선택) 잘린 토큰 잡는 라이트 필터: 핵심 조각 + 길이
+        if "|_CAEaAhAB." in tok and len(tok) < 100:
             continue
         if tok not in seen:
             seen.add(tok)
@@ -486,7 +490,7 @@ class DMFilePromptView(discord.ui.View):
             self.busy = False
             return await dm.send(embed=make_embed(None, "파일이 비어있어. 다시 올려줘!", color=discord.Color.red()))
 
-        # 진행 중 임베드 먼저 표시(지우지 않고 남겨둠)
+        # 진행 중 임베드 먼저 표시(제목 없음)
         await dm.send(embed=progress_embed())
 
         try:
