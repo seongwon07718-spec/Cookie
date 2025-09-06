@@ -6,7 +6,6 @@ import datetime as dt
 
 import discord
 from discord.ext import commands
-from discord import app_commands
 from discord import Interaction, TextStyle
 from discord.ui import View, Modal, TextInput
 
@@ -17,7 +16,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # 선택: 숫자. 비우면 글로벌 싱크
 
 # ========================
-# 이모지(유니코드: 어디서나 정상 렌더링)
+# 이모지(유니코드: 서버 상관없이 정상)
 # ========================
 EMO = {
     "ok": "✅",
@@ -26,29 +25,23 @@ EMO = {
 }
 
 # ========================
-# 임베드 유틸(검정)
+# 임베드 유틸(검정, 시간 제거)
 # ========================
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
 
-def now_utc_str():
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-def base_embed(desc: str = "") -> discord.Embed:
-    # 공통 임베드(푸터에 요청 시각 표시)
-    return discord.Embed(
-        color=COLOR_BLACK,
-        description=desc
-    ).set_footer(text=f"요청 시간: {now_utc_str()} UTC")
+def base_embed(desc: str = "", title: str | None = None) -> discord.Embed:
+    emb = discord.Embed(description=desc, color=COLOR_BLACK)
+    if title:
+        emb.title = title
+    return emb
 
 def main_menu_embed() -> discord.Embed:
-    # 제목 크게(임베드 title), 설명은 작은 본문 라인
-    emb = discord.Embed(
+    # 제목 크게(title), 설명은 본문(조금 작게 보임)
+    return discord.Embed(
         title="쿠키 체커",
         description="쿠키 체커를 원하시면 아래 버튼을 눌러주세요",
         color=COLOR_BLACK
     )
-    emb.set_footer(text=f"요청 시간: {now_utc_str()} UTC")
-    return emb
 
 # ========================
 # 모달: 쿠키 검증
@@ -75,7 +68,8 @@ class CookieModal(Modal, title="쿠키 검증"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        await inter.response.send_message(embed=embed, ephemeral=True)
+        # 모두가 보이게(에페메럴 X)
+        await inter.response.send_message(embed=embed)
 
 # ========================
 # 모달: 전체 계정 정보 조회
@@ -87,7 +81,6 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
         embed = base_embed()
         try:
             async with aiohttp.ClientSession(cookies={'.ROBLOSECURITY': self.cookie.value}) as session:
-                # 인증
                 async with session.get('https://users.roblox.com/v1/users/authenticated') as auth_res:
                     auth_text = await auth_res.text()
                     if '"id":' in auth_text:
@@ -132,10 +125,11 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        await inter.response.send_message(embed=embed, ephemeral=True)
+        # 모두가 보이게
+        await inter.response.send_message(embed=embed)
 
 # ========================
-# 버튼 뷰(회색 버튼만)
+# 버튼 뷰(회색 버튼 2개)
 # ========================
 class CheckView(View):
     @discord.ui.button(label="쿠키검증", style=discord.ButtonStyle.secondary)
@@ -170,15 +164,15 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
-    print(f"{now_utc_str()} UTC → 로그인: {bot.user}")
+    print(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC → 로그인: {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Cookie Checker"))
 
 @bot.tree.command(name="체킹", description="로블록스 쿠키 및 정보 체킹 메뉴")
 async def check(inter: Interaction):
+    # 공개 메시지(에페메럴 X)
     await inter.response.send_message(
         embed=main_menu_embed(),
-        view=CheckView(),
-        ephemeral=True
+        view=CheckView()
     )
 
 if __name__ == "__main__":
