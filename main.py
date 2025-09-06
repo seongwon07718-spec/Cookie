@@ -154,7 +154,7 @@ class CheckView(View):
     async def b1(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(CookieModal())
 
-    @discord.ui.button(label="쿠키 전체조회", style=discord.ButtonStyle.secondary, custom_id="total_check_btn")
+    @discord.ui.button(label="쿠키 전체 조회", style=discord.ButtonStyle.secondary, custom_id="total_check_btn")
     async def b2(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(TotalCheckModal())
 
