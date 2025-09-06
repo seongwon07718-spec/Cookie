@@ -16,15 +16,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # 선택: 숫자. 비우면 글로벌 싱크
 
 # ========================
-# 표시/삭제 정책
+# 표시 정책 스위치
 # ========================
-# True  → 모든 응답/메뉴를 '나만 보이게(ephemeral)'
-# False → 공개로 보내고, 아래 AUTO_DELETE_SECONDS 후 자동삭제
-USE_EPHEMERAL = True
-AUTO_DELETE_SECONDS = 300  # 5분
+MENU_PUBLIC = True                 # True → /체킹 메뉴는 모두 보이게
+RESULTS_EPHEMERAL = True          # True → 모달 결과는 본인만 보이게
+RESULTS_PUBLIC_DELETE_AFTER = 300 # 결과를 공개로 쓸 때 자동삭제(초). RESULTS_EPHEMERAL=False일 때만 적용
 
 # ========================
-# 이모지(유니코드: 서버 상관없이 정상)
+# 이모지(유니코드)
 # ========================
 EMO = {
     "ok": "✅",
@@ -33,7 +32,7 @@ EMO = {
 }
 
 # ========================
-# 임베드 유틸(검정, 시간표시 제거)
+# 임베드 유틸(검정, 시간표시 없음)
 # ========================
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
 
@@ -53,18 +52,22 @@ def main_menu_embed() -> discord.Embed:
 # ========================
 # 공통 응답 헬퍼
 # ========================
-async def send_interaction(inter: Interaction, *, embed: discord.Embed, view: View | None = None):
-    # 이미 응답했는지 체크
-    if USE_EPHEMERAL:
+async def send_result(inter: Interaction, *, embed: discord.Embed, view: discord.ui.View | None = None):
+    """
+    모달 결과 응답. RESULTS_EPHEMERAL 스위치에 따라 동작.
+    - True  → 에페메럴(개인보기). delete_after 사용 불가(디스코드 정책).
+    - False → 공개 + delete_after 타이머 적용.
+    """
+    if RESULTS_EPHEMERAL:
         if not inter.response.is_done():
             await inter.response.send_message(embed=embed, view=view, ephemeral=True)
         else:
             await inter.followup.send(embed=embed, view=view, ephemeral=True)
     else:
         if not inter.response.is_done():
-            await inter.response.send_message(embed=embed, view=view, delete_after=AUTO_DELETE_SECONDS)
+            await inter.response.send_message(embed=embed, view=view, delete_after=RESULTS_PUBLIC_DELETE_AFTER)
         else:
-            await inter.followup.send(embed=embed, view=view, delete_after=AUTO_DELETE_SECONDS)
+            await inter.followup.send(embed=embed, view=view, delete_after=RESULTS_PUBLIC_DELETE_AFTER)
 
 # ========================
 # 모달: 쿠키 검증
@@ -91,7 +94,7 @@ class CookieModal(Modal, title="쿠키 검증"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        await send_interaction(inter, embed=embed)
+        await send_result(inter, embed=embed)
 
 # ========================
 # 모달: 전체 계정 정보 조회
@@ -112,12 +115,12 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
                             async with session.get(url) as r:
                                 return await r.json()
 
-                        robux_task = fetch_json(f'https://economy.roblox.com/v1/users/{user_id}/currency')
-                        credit_task = fetch_json('https://billing.roblox.com/v1/credit')
+                        robux_task    = fetch_json(f'https://economy.roblox.com/v1/users/{user_id}/currency')
+                        credit_task   = fetch_json('https://billing.roblox.com/v1/credit')
                         settings_task = fetch_json('https://www.roblox.com/my/settings/json')
-                        friends_task = fetch_json('https://friends.roblox.com/v1/my/friends/count')
-                        voice_task = fetch_json('https://voice.roblox.com/v1/settings')
-                        thumb_task = fetch_json(
+                        friends_task  = fetch_json('https://friends.roblox.com/v1/my/friends/count')
+                        voice_task    = fetch_json('https://voice.roblox.com/v1/settings')
+                        thumb_task    = fetch_json(
                             f'https://thumbnails.roblox.com/v1/users/avatar-headshot?size=48x48&format=png&userIds={user_id}'
                         )
 
@@ -147,10 +150,10 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        await send_interaction(inter, embed=embed)
+        await send_result(inter, embed=embed)
 
 # ========================
-# 버튼 뷰(회색 버튼 2개)
+# 버튼 뷰(회색 2개)
 # ========================
 class CheckView(View):
     @discord.ui.button(label="쿠키검증", style=discord.ButtonStyle.secondary)
@@ -190,11 +193,11 @@ async def on_ready():
 
 @bot.tree.command(name="체킹", description="로블록스 쿠키 및 정보 체킹 메뉴")
 async def check(inter: Interaction):
-    # 메뉴 자체도 위 정책 따라감
-    if USE_EPHEMERAL:
-        await inter.response.send_message(embed=main_menu_embed(), view=CheckView(), ephemeral=True)
+    # 메뉴는 공개(MENU_PUBLIC) 기준. True면 공개, False면 에페메럴.
+    if MENU_PUBLIC:
+        await inter.response.send_message(embed=main_menu_embed(), view=CheckView())
     else:
-        await inter.response.send_message(embed=main_menu_embed(), view=CheckView(), delete_after=AUTO_DELETE_SECONDS)
+        await inter.response.send_message(embed=main_menu_embed(), view=CheckView(), ephemeral=True)
 
 if __name__ == "__main__":
     if not TOKEN:
