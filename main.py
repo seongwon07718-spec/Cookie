@@ -16,6 +16,14 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # 선택: 숫자. 비우면 글로벌 싱크
 
 # ========================
+# 표시/삭제 정책
+# ========================
+# True  → 모든 응답/메뉴를 '나만 보이게(ephemeral)'
+# False → 공개로 보내고, 아래 AUTO_DELETE_SECONDS 후 자동삭제
+USE_EPHEMERAL = True
+AUTO_DELETE_SECONDS = 300  # 5분
+
+# ========================
 # 이모지(유니코드: 서버 상관없이 정상)
 # ========================
 EMO = {
@@ -25,23 +33,38 @@ EMO = {
 }
 
 # ========================
-# 임베드 유틸(검정, 시간 제거)
+# 임베드 유틸(검정, 시간표시 제거)
 # ========================
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
 
-def base_embed(desc: str = "", title: str | None = None) -> discord.Embed:
+def make_embed(title: str | None = None, desc: str = "") -> discord.Embed:
     emb = discord.Embed(description=desc, color=COLOR_BLACK)
     if title:
         emb.title = title
     return emb
 
 def main_menu_embed() -> discord.Embed:
-    # 제목 크게(title), 설명은 본문(조금 작게 보임)
     return discord.Embed(
         title="쿠키 체커",
         description="쿠키 체커를 원하시면 아래 버튼을 눌러주세요",
         color=COLOR_BLACK
     )
+
+# ========================
+# 공통 응답 헬퍼
+# ========================
+async def send_interaction(inter: Interaction, *, embed: discord.Embed, view: View | None = None):
+    # 이미 응답했는지 체크
+    if USE_EPHEMERAL:
+        if not inter.response.is_done():
+            await inter.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            await inter.followup.send(embed=embed, view=view, ephemeral=True)
+    else:
+        if not inter.response.is_done():
+            await inter.response.send_message(embed=embed, view=view, delete_after=AUTO_DELETE_SECONDS)
+        else:
+            await inter.followup.send(embed=embed, view=view, delete_after=AUTO_DELETE_SECONDS)
 
 # ========================
 # 모달: 쿠키 검증
@@ -50,7 +73,7 @@ class CookieModal(Modal, title="쿠키 검증"):
     cookie = TextInput(label=".ROBLOSECURITY 쿠키", style=TextStyle.short)
 
     async def on_submit(self, inter: Interaction):
-        embed = base_embed()
+        embed = make_embed()
         try:
             async with aiohttp.ClientSession(cookies={'.ROBLOSECURITY': self.cookie.value}) as session:
                 async with session.get('https://users.roblox.com/v1/users/authenticated') as resp:
@@ -68,8 +91,7 @@ class CookieModal(Modal, title="쿠키 검증"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        # 모두가 보이게(에페메럴 X)
-        await inter.response.send_message(embed=embed)
+        await send_interaction(inter, embed=embed)
 
 # ========================
 # 모달: 전체 계정 정보 조회
@@ -78,7 +100,7 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
     cookie = TextInput(label="로블록스 쿠키", style=TextStyle.short)
 
     async def on_submit(self, inter: Interaction):
-        embed = base_embed()
+        embed = make_embed()
         try:
             async with aiohttp.ClientSession(cookies={'.ROBLOSECURITY': self.cookie.value}) as session:
                 async with session.get('https://users.roblox.com/v1/users/authenticated') as auth_res:
@@ -125,8 +147,7 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
             embed.set_author(name=f"{EMO['err']} 요청 실패")
             embed.add_field(name="에러", value=f"```\n{e}\n```", inline=False)
 
-        # 모두가 보이게
-        await inter.response.send_message(embed=embed)
+        await send_interaction(inter, embed=embed)
 
 # ========================
 # 버튼 뷰(회색 버튼 2개)
@@ -169,11 +190,11 @@ async def on_ready():
 
 @bot.tree.command(name="체킹", description="로블록스 쿠키 및 정보 체킹 메뉴")
 async def check(inter: Interaction):
-    # 공개 메시지(에페메럴 X)
-    await inter.response.send_message(
-        embed=main_menu_embed(),
-        view=CheckView()
-    )
+    # 메뉴 자체도 위 정책 따라감
+    if USE_EPHEMERAL:
+        await inter.response.send_message(embed=main_menu_embed(), view=CheckView(), ephemeral=True)
+    else:
+        await inter.response.send_message(embed=main_menu_embed(), view=CheckView(), delete_after=AUTO_DELETE_SECONDS)
 
 if __name__ == "__main__":
     if not TOKEN:
