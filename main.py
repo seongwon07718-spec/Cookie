@@ -16,23 +16,19 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")  # 선택: 숫자. 비우면 글로벌 싱크
 
 # ========================
-# 표시 정책 스위치
+# 표시 정책
 # ========================
-MENU_PUBLIC = True                 # True → /체킹 메뉴는 모두 보이게
-RESULTS_EPHEMERAL = True          # True → 모달 결과는 본인만 보이게
-RESULTS_PUBLIC_DELETE_AFTER = 300 # 결과를 공개로 쓸 때 자동삭제(초). RESULTS_EPHEMERAL=False일 때만 적용
+MENU_PUBLIC = True                 # 메뉴는 모두 보이게
+RESULTS_EPHEMERAL = True          # 결과는 본인만 보이게(추천). False면 공개 + delete_after 적용
+RESULTS_PUBLIC_DELETE_AFTER = 300 # 공개 결과일 때만 사용(초)
 
 # ========================
 # 이모지(유니코드)
 # ========================
-EMO = {
-    "ok": "✅",
-    "warn": "⚠️",
-    "err": "❌",
-}
+EMO = {"ok": "✅", "warn": "⚠️", "err": "❌"}
 
 # ========================
-# 임베드 유틸(검정, 시간표시 없음)
+# 임베드 유틸(검정)
 # ========================
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
 
@@ -50,14 +46,9 @@ def main_menu_embed() -> discord.Embed:
     )
 
 # ========================
-# 공통 응답 헬퍼
+# 공통 응답
 # ========================
 async def send_result(inter: Interaction, *, embed: discord.Embed, view: discord.ui.View | None = None):
-    """
-    모달 결과 응답. RESULTS_EPHEMERAL 스위치에 따라 동작.
-    - True  → 에페메럴(개인보기). delete_after 사용 불가(디스코드 정책).
-    - False → 공개 + delete_after 타이머 적용.
-    """
     if RESULTS_EPHEMERAL:
         if not inter.response.is_done():
             await inter.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -72,8 +63,8 @@ async def send_result(inter: Interaction, *, embed: discord.Embed, view: discord
 # ========================
 # 모달: 쿠키 검증
 # ========================
-class CookieModal(Modal, title="쿠키 검증"):
-    cookie = TextInput(label=".ROBLOSECURITY 쿠키", style=TextStyle.short)
+class CookieModal(Modal, title="쿠키 상태 보기"):
+    cookie = TextInput(label="쿠키 입력하세요", style=TextStyle.short)
 
     async def on_submit(self, inter: Interaction):
         embed = make_embed()
@@ -99,8 +90,8 @@ class CookieModal(Modal, title="쿠키 검증"):
 # ========================
 # 모달: 전체 계정 정보 조회
 # ========================
-class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
-    cookie = TextInput(label="로블록스 쿠키", style=TextStyle.short)
+class TotalCheckModal(Modal, title="쿠키 전체 조회"):
+    cookie = TextInput(label="쿠키 입력하세요", style=TextStyle.short)
 
     async def on_submit(self, inter: Interaction):
         embed = make_embed()
@@ -128,7 +119,7 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
                             robux_task, credit_task, settings_task, friends_task, voice_task, thumb_task
                         )
 
-                        embed.set_author(name=f"{EMO['ok']} 전체 계정 정보")
+                        embed.set_author(name=f"{EMO['ok']} 쿠키 전체 계정 정보")
                         embed.set_thumbnail(url=thumb.get('data', [{}])[0].get('imageUrl', 'N/A'))
                         embed.add_field(name="로벅스", value=f"{robux.get('robux', 0)} R$", inline=True)
                         embed.add_field(name="크레딧 잔액", value=f"{credit.get('balance', 0)} {credit.get('currencyCode', '')}", inline=True)
@@ -153,14 +144,17 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
         await send_result(inter, embed=embed)
 
 # ========================
-# 버튼 뷰(회색 2개)
+# 버튼 뷰(영구 뷰: timeout=None + custom_id 고정)
 # ========================
 class CheckView(View):
-    @discord.ui.button(label="쿠키검증", style=discord.ButtonStyle.secondary)
+    def __init__(self):
+        super().__init__(timeout=None)  # 영구 뷰(만료 없음)
+
+    @discord.ui.button(label="쿠키 상태", style=discord.ButtonStyle.secondary, custom_id="cookie_check_btn")
     async def b1(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(CookieModal())
 
-    @discord.ui.button(label="전체조회", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="쿠키 전체조회", style=discord.ButtonStyle.secondary, custom_id="total_check_btn")
     async def b2(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(TotalCheckModal())
 
@@ -173,6 +167,7 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix=".", intents=intents)
 
     async def setup_hook(self):
+        # 길드/글로벌 싱크
         try:
             if GUILD_ID:
                 gid = int(GUILD_ID)
@@ -188,12 +183,19 @@ bot = MyBot()
 
 @bot.event
 async def on_ready():
+    # 영구 뷰 등록: 재시작 후에도 기존 버튼이 살아있게
+    try:
+        bot.add_view(CheckView())
+        print("[VIEW] persistent CheckView 등록 완료")
+    except Exception as e:
+        print("[VIEW] 등록 실패:", e)
+
     print(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC → 로그인: {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Cookie Checker"))
 
 @bot.tree.command(name="체킹", description="로블록스 쿠키 및 정보 체킹 메뉴")
 async def check(inter: Interaction):
-    # 메뉴는 공개(MENU_PUBLIC) 기준. True면 공개, False면 에페메럴.
+    # 메뉴는 공개(모두 보이게)
     if MENU_PUBLIC:
         await inter.response.send_message(embed=main_menu_embed(), view=CheckView())
     else:
