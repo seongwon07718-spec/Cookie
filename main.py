@@ -15,23 +15,25 @@ GUILD_ID = os.getenv("GUILD_ID")  # 선택
 # 표시/동작 정책
 # ========================
 MENU_PUBLIC = True
-RESULTS_EPHEMERAL = True           # 서버에서의 인터랙션 응답은 에페메럴
-CHUNK_SIZE = 500                   # 청크 처리 크기(사실상 무제한)
+RESULTS_EPHEERAL = True            # 서버에서 인터랙션 응답은 에페메럴
+CHUNK_SIZE = 500                   # 청크 크기(사실상 무제한)
 CONCURRENCY_AUTH = 8               # 인증 동시성
 CONCURRENCY_BADGE = 5              # 배지/판정 동시성
-MAX_TOTAL = 0                      # 0이면 입력 상한 해제(사실상 무제한)
+CONCURRENCY_ECON = 6               # 로벅스/지출 동시성
+MAX_TOTAL = 0                      # 0이면 입력 상한 해제
+MAX_TRX_PAGES = 10                 # 지출 합계 조회 시 최대 페이지(1페이지=최근 100건), 속도/안정성용 안전장치
 
 # ========================
-# 전역 네트워크(지연 생성)
+# 전역 네트워크(지연 생성: 3.13 호환)
 # ========================
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=5, sock_read=20)
-TCP_CONN: aiohttp.TCPConnector | None = None  # 지연 생성으로 3.13 루프 오류 회피
+TCP_CONN: aiohttp.TCPConnector | None = None  # 지연 생성
 
 def new_session(cookies=None):
     global TCP_CONN
     if TCP_CONN is None:
         TCP_CONN = aiohttp.TCPConnector(
-            limit=0,
+            limit=0,                # 전체 연결 제한 해제(실제 제어는 세마포어)
             limit_per_host=20,
             ttl_dns_cache=300,
             enable_cleanup_closed=True
@@ -48,22 +50,24 @@ def new_session(cookies=None):
 # ========================
 EMO = {"ok":"✅","warn":"⚠️","err":"❌"}
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
+COLOR_BLUE = discord.Color.blurple()
+COLOR_GREEN = discord.Color.green()
 
-def make_embed(title: str | None = None, desc: str = "") -> discord.Embed:
-    emb = discord.Embed(description=desc, color=COLOR_BLACK)
+def make_embed(title: str | None = None, desc: str = "", color: discord.Color = COLOR_BLACK) -> discord.Embed:
+    emb = discord.Embed(description=desc, color=color)
     if title:
         emb.title = title
     return emb
 
 def main_menu_embed() -> discord.Embed:
     return discord.Embed(
-        title="쿠키 체커",
-        description="아래 버튼으로 기능을 선택해줘.",
+        title="무료 쿠키 체커기",
+        description="원하는 체커를 클릭하여 이용해주세요.",
         color=COLOR_BLACK
     )
 
 async def send_result(inter: Interaction, *, embed: discord.Embed, view: discord.ui.View | None = None, files: list[discord.File] | None = None):
-    if RESULTS_EPHEMERAL:
+    if RESULTS_EPHEERAL:
         if not inter.response.is_done():
             await inter.response.send_message(embed=embed, view=view, files=files, ephemeral=True)
         else:
@@ -262,6 +266,49 @@ async def get_played_games_for_user(user_id: int, auth_cookie: str):
         return played
 
 # ========================
+# 로벅스 잔액/전체 지출(추가)
+# ========================
+async def fetch_robux_balance(user_id: int, session: aiohttp.ClientSession) -> int:
+    st, data = await fetch_json_with_retry(session, "GET", f"https://economy.roblox.com/v1/users/{user_id}/currency")
+    if st == 200 and isinstance(data, dict):
+        return int(data.get("robux", 0))
+    return 0
+
+async def sum_total_spend(user_id: int, session: aiohttp.ClientSession, max_pages: int = MAX_TRX_PAGES) -> int:
+    # Purchase 트랜잭션 합계(최대 max_pages*100건). 더 깊게 원하면 max_pages↑
+    total = 0
+    cursor = None
+    pages = 0
+    base = f"https://economy.roblox.com/v2/users/{user_id}/transactions?transactionType=Purchase&limit=100"
+    while pages < max_pages:
+        url = base + (f"&cursor={cursor}" if cursor else "")
+        st, data = await fetch_json_with_retry(session, "GET", url)
+        if st != 200 or not isinstance(data, dict):
+            break
+        for row in data.get("data", []):
+            # amount가 음수/양수로 올 수 있는데, Purchase는 대체로 음수(지출)로 보고됨
+            amt = int(row.get("amount", 0))
+            # 지출 절대값 합산
+            total += abs(amt)
+        cursor = data.get("nextPageCursor")
+        pages += 1
+        if not cursor:
+            break
+    return total
+
+async def get_robux_and_spend(user_id: int, auth_cookie: str) -> tuple[int, int]:
+    # 동일 세션 재사용으로 왕복 줄이기
+    try:
+        async with new_session(cookies={'.ROBLOSECURITY': auth_cookie}) as s:
+            bal, spend = await asyncio.gather(
+                fetch_robux_balance(user_id, s),
+                sum_total_spend(user_id, s, MAX_TRX_PAGES)
+            )
+            return bal, spend
+    except:
+        return 0, 0
+
+# ========================
 # DM 처리(청크 분할 + 임베드 결과)
 # ========================
 def chunked(seq, n):
@@ -271,7 +318,7 @@ def chunked(seq, n):
 async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
     pairs = parse_cookies_blob(raw_text)
     if not pairs:
-        return await dm.send(embed=make_embed("⚠️ 쿠키 없음", "파일에서 쿠키를 찾지 못했어."))
+        return await dm.send(embed=make_embed("쿠키 없음", "파일에서 쿠키를 찾지 못했습니다.", color=COLOR_BLACK))
 
     if MAX_TOTAL and len(pairs) > MAX_TOTAL:
         pairs = pairs[:MAX_TOTAL]
@@ -282,7 +329,6 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 
     for part in chunked(pairs, CHUNK_SIZE):
         chunk_idx += 1
-        await dm.trigger_typing()
 
         # 1) 인증
         auth_results = await bulk_authenticate(part)
@@ -296,22 +342,47 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         game_buckets: dict[str, list[str]] = {}
         if ok_entries:
             sem_badge = asyncio.Semaphore(CONCURRENCY_BADGE)
-            async def one(item):
+            async def one_badge(item):
                 auth, outv, uid, uname = item
                 async with sem_badge:
                     keys = await get_played_games_for_user(uid, auth)
                     return outv, keys
-            played_results = await asyncio.gather(*[one(it) for it in ok_entries])
+            played_results = await asyncio.gather(*[one_badge(it) for it in ok_entries])
             for outv, keys in played_results:
                 for k in keys:
                     game_buckets.setdefault(k, []).append(outv)
 
-        # 3) 파일 구성(작동되는 것만)
+        # 3) 로벅스 잔액/전체 지출 (추가)
+        total_robux_sum = 0
+        total_spend_sum = 0
+        robux_positive_list: list[str] = []
+        if ok_entries:
+            sem_econ = asyncio.Semaphore(CONCURRENCY_ECON)
+            async def one_econ(item):
+                auth, outv, uid, uname = item
+                async with sem_econ:
+                    bal, spend = await get_robux_and_spend(uid, auth)
+                    return outv, bal, spend
+            econ_results = await asyncio.gather(*[one_econ(it) for it in ok_entries])
+            for outv, bal, spend in econ_results:
+                total_robux_sum += max(bal, 0)
+                total_spend_sum += max(spend, 0)
+                if bal > 0:
+                    robux_positive_list.append(outv)
+
+        # 4) 파일 구성(작동되는 것만)
         files: list[discord.File] = []
+        # 로그인 성공 쿠키 전체
         if ok_entries:
             buf_valid = io.BytesIO(("\n".join(outv for _, outv, _, _ in ok_entries)).encode("utf-8"))
             files.append(discord.File(buf_valid, filename=f"valid_cookies_part{chunk_idx}.txt"))
 
+        # 로벅스 있는 쿠키
+        if robux_positive_list:
+            buf_pos = io.BytesIO(("\n".join(robux_positive_list)).encode("utf-8"))
+            files.append(discord.File(buf_pos, filename=f"robux_positive_part{chunk_idx}.txt"))
+
+        # 게임별 파일
         fn_map = {
             "grow_a_garden": f"grow_a_garden_part{chunk_idx}.txt",
             "adopt_me":      f"adopt_me_part{chunk_idx}.txt",
@@ -335,18 +406,22 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 
         emb = make_embed(
             title=f"{EMO['ok']} 파일 검증 결과(청크 {chunk_idx})" if success else f"{EMO['err']} 파일 검증 결과(청크 {chunk_idx})",
-            desc=desc
+            desc=desc,
+            color=COLOR_BLACK
         )
         emb.add_field(name="총 개수(누적/전체)", value=f"{done_cnt} / {total_cnt}", inline=True)
         emb.add_field(name="로그인 성공(이번 청크)", value=str(success), inline=True)
         emb.add_field(name="로그인 실패(이번 청크)", value=str(fail), inline=True)
+        # 추가: 로벅스 보유/전체 지출(합계)
+        emb.add_field(name="로벅스 보유 합계", value=f"{total_robux_sum} R$", inline=True)
+        emb.add_field(name="전체 지출 합계", value=f"{total_spend_sum} R$", inline=True)
 
         await dm.send(embed=emb, files=files or None)
 
 # ========================
-# 모달/뷰(모든 안내 임베드)
+# 모달(쿠키/전체 조회)
 # ========================
-class CookieModal(Modal, title="쿠키 검증"):
+class CookieModal(Modal, title="쿠키 상태"):
     cookie = TextInput(
         label=".ROBLOSECURITY 쿠키(여러 개 가능)",
         placeholder="한 줄에 하나씩 (._ROBLOSECURITY=… / _|WARNING… / \"ROBLOSECURITY\":\"…\")",
@@ -355,31 +430,32 @@ class CookieModal(Modal, title="쿠키 검증"):
         max_length=8000
     )
     async def on_submit(self, inter: Interaction):
-        await inter.response.defer(ephemeral=RESULTS_EPHEMERAL)
+        await inter.response.defer(ephemeral=RESULTS_EPHEERAL)
         pairs = parse_cookies_blob(str(self.cookie))
         if not pairs:
-            return await send_result(inter, embed=make_embed("⚠️ 입력 필요", "쿠키가 비어있어."))
+            return await send_result(inter, embed=make_embed("입력 필요", "쿠키가 비어있어.", color=COLOR_GREEN))
         auth_results = await bulk_authenticate(pairs)
         ok_cnt = sum(1 for (_, _), r in zip(pairs, auth_results) if r[0] and r[2])
         fail_cnt = len(pairs) - ok_cnt
         emb = make_embed(
-            title=f"{EMO['ok']} 쿠키 검증 결과" if ok_cnt else f"{EMO['err']} 쿠키 검증 결과",
-            desc="빠른 요약(파일 첨부 없음)"
+            title="쿠키 상태",
+            desc="빠른 요약(파일 첨부 없음)",
+            color=COLOR_GREEN
         )
         emb.add_field(name="총 개수", value=str(len(pairs)), inline=True)
         emb.add_field(name="로그인 성공", value=str(ok_cnt), inline=True)
         emb.add_field(name="로그인 실패", value=str(fail_cnt), inline=True)
         await send_result(inter, embed=emb)
 
-class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
+class TotalCheckModal(Modal, title="전체 조회"):
     cookie = TextInput(label="로블록스 쿠키", style=TextStyle.short)
     async def on_submit(self, inter: Interaction):
-        await inter.response.defer(ephemeral=RESULTS_EPHEMERAL)
+        await inter.response.defer(ephemeral=RESULTS_EPHEERAL)
         try:
             async with new_session(cookies={'.ROBLOSECURITY': self.cookie.value}) as s:
                 st, data = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated")
                 if st != 200 or not data.get("id"):
-                    return await send_result(inter, embed=make_embed("❌ 유효하지 않은 쿠키", "로그인 실패"))
+                    return await send_result(inter, embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=COLOR_BLUE))
                 user_id = data["id"]
 
                 async def fj(url: str):
@@ -395,10 +471,13 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
                     fj(f'https://thumbnails.roblox.com/v1/users/avatar-headshot?size=48x48&format=png&userIds={user_id}')
                 )
 
-                emb = make_embed()
-                emb.set_author(name=f"{EMO['ok']} 전체 계정 정보")
+                # 지출 합계(더 깊게 원하면 MAX_TRX_PAGES 상향)
+                total_spend = await sum_total_spend(user_id, s, MAX_TRX_PAGES)
+
+                emb = make_embed(title="전체 조회", color=COLOR_BLUE)
                 emb.set_thumbnail(url=(thumb.get('data', [{}])[0].get('imageUrl') or discord.Embed.Empty))
                 emb.add_field(name="로벅스", value=f"{robux.get('robux', 0)} R$", inline=True)
+                emb.add_field(name="전체 지출 합계", value=f"{total_spend} R$", inline=True)
                 emb.add_field(name="크레딧", value=f"{credit.get('balance', 0)} {credit.get('currencyCode', '')}", inline=True)
                 emb.add_field(name="닉네임", value=str(settings.get('Name')), inline=True)
                 emb.add_field(name="친구 수", value=str(friends.get('count', 0)), inline=True)
@@ -406,8 +485,11 @@ class TotalCheckModal(Modal, title="전체 계정 정보 조회"):
 
                 await send_result(inter, embed=emb)
         except Exception as e:
-            await send_result(inter, embed=make_embed("❌ 요청 실패", f"{type(e).__name__}: {e}"))
+            await send_result(inter, embed=make_embed("요청 실패", f"{type(e).__name__}: {e}", color=COLOR_BLUE))
 
+# ========================
+# DM 파일검증 뷰(임베드 안내 → DM에서 업로드)
+# ========================
 class DMFilePromptView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=120)
@@ -417,7 +499,7 @@ class DMFilePromptView(discord.ui.View):
     @discord.ui.button(label="파일검증(DM으로 진행)", style=discord.ButtonStyle.primary, custom_id="file_dm_btn")
     async def dm_btn(self, inter: Interaction, button: discord.ui.Button):
         if self.busy:
-            return await inter.response.send_message(embed=make_embed("안내", "이미 진행 중이야. DM 확인해줘!"), ephemeral=True)
+            return await inter.response.send_message(embed=make_embed("안내", "이미 진행 중입니다. DM 확인해주세요.", color=COLOR_BLACK), ephemeral=True)
         self.busy = True
 
         # 1) DM 열기
@@ -425,15 +507,16 @@ class DMFilePromptView(discord.ui.View):
             dm = await inter.user.create_dm()
         except Exception as e:
             self.busy = False
-            return await inter.response.send_message(embed=make_embed("❌ DM 불가", f"DM 허용을 켜줘! ({e})"), ephemeral=True)
+            return await inter.response.send_message(embed=make_embed("DM 전송 실패", f"DM 허용을 켜주세요. ({e})", color=COLOR_BLACK), ephemeral=True)
 
-        # 2) 서버 쪽 즉시 응답(임베드)
-        await inter.response.send_message(embed=make_embed("DM 전송", "DM으로 안내를 보냈어. 거기서 파일 올려줘!"), ephemeral=True)
+        # 2) 서버쪽 즉시 응답(임베드)
+        await inter.response.send_message(embed=make_embed("DM 안내", "DM 보냈습니다. DM에서 파일 올려주세요.", color=COLOR_BLACK), ephemeral=True)
 
         # 3) DM 안내(임베드)
         await dm.send(embed=make_embed(
-            title="파일 검증 시작",
-            desc="여기에 파일을 올려줘.\n- 지원: txt / log / csv / json / zip\n- 인식: _|WARNING…, .ROBLOSECURITY=…, \"ROBLOSECURITY\":\"…\"\n- 제한: 2분 내 업로드"
+            title="파일 검증",
+            desc="여기에 파일을 올려줘.\n- 지원: txt / log / csv / json / zip\n- 인식: _|WARNING…, .ROBLOSECURITY=…, \"ROBLOSECURITY\":\"…\"\n- 제한: 2분 내 업로드",
+            color=COLOR_BLACK
         ))
 
         # 4) DM에서 업로드 대기
@@ -444,10 +527,10 @@ class DMFilePromptView(discord.ui.View):
             msg: discord.Message = await self.bot.wait_for("message", check=check_msg, timeout=120)
         except asyncio.TimeoutError:
             self.busy = False
-            return await dm.send(embed=make_embed("⚠️ 시간 초과", "다시 서버에서 [파일검증] 눌러 시작해줘."))
+            return await dm.send(embed=make_embed("시간 초과", "다시 서버에서 [파일검증] 눌러 시작해주세요.", color=COLOR_BLACK))
 
         att = msg.attachments[0]
-        await dm.send(embed=make_embed("진행 중", "파일을 받았어. 검증을 시작할게."))
+        await dm.send(embed=make_embed("진행 중", "파일을 받았습니다. 검증을 시작하겠습니다.", color=COLOR_BLACK))
 
         # 5) 처리 시작(청크 전송)
         try:
@@ -455,28 +538,35 @@ class DMFilePromptView(discord.ui.View):
             combined = "\n\n".join(texts)
             await handle_file_check_logic_dm(dm, combined)
         except Exception as e:
-            await dm.send(embed=make_embed("❌ 처리 실패", f"{type(e).__name__}: {e}"))
+            await dm.send(embed=make_embed("처리 실패", f"{type(e).__name__}: {e}", color=COLOR_BLACK))
         finally:
             self.busy = False
 
+# ========================
+# 버튼 뷰(색상/타이틀 반영)
+# ========================
 class CheckView(View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(label="쿠키검증", style=discord.ButtonStyle.secondary, custom_id="cookie_check_btn")
+    # 쿠키검증 → 초록(SUCCESS), 모달 타이틀 "쿠키 상태"
+    @discord.ui.button(label="쿠키 상태", style=discord.ButtonStyle.success, custom_id="cookie_check_btn")
     async def b1(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(CookieModal())
 
-    @discord.ui.button(label="전체조회", style=discord.ButtonStyle.secondary, custom_id="total_check_btn")
+    # 전체조회 → 파랑(PRIMARY), 모달 타이틀 "전체 조회"
+    @discord.ui.button(label="쿠키 전체 조회", style=discord.ButtonStyle.primary, custom_id="total_check_btn")
     async def b2(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(TotalCheckModal())
 
-    @discord.ui.button(label="파일검증", style=discord.ButtonStyle.secondary, custom_id="file_check_btn")
+    # 파일검증 → 회색(SECONDARY), 임베드 타이틀 "파일 검증"
+    @discord.ui.button(label="쿠키 파일 검증", style=discord.ButtonStyle.secondary, custom_id="file_check_btn")
     async def b3(self, inter: Interaction, button: discord.ui.Button):
         emb = make_embed(
-            title="파일 검증(DM 전용)",
-            desc="아래 버튼을 누르면 너랑 나만 보는 DM에서 파일을 받을게."
+            title="파일 검증",
+            desc="아래 버튼을 누르면 봇이 DM 갑니다.",
+            color=COLOR_BLACK
         )
         view = DMFilePromptView(inter.client)
         await inter.response.send_message(embed=emb, view=view, ephemeral=True)
@@ -515,7 +605,7 @@ async def on_ready():
 # ========================
 # 메뉴(공개)
 # ========================
-@bot.tree.command(name="체킹", description="로블록스 쿠키 및 정보 체킹 메뉴")
+@bot.tree.command(name="체커기", description="체커기 생성하기")
 async def check(inter: Interaction):
     if MENU_PUBLIC:
         await inter.response.send_message(embed=main_menu_embed(), view=CheckView(bot))
@@ -523,20 +613,21 @@ async def check(inter: Interaction):
         await inter.response.send_message(embed=main_menu_embed(), view=CheckView(bot), ephemeral=True)
 
 # ========================
-# 슬래시: 파일검증(바로 DM으로 안내)
+# 슬래시: 파일검증(바로 DM 안내)
 # ========================
 @bot.tree.command(name="파일검증", description="DM으로 파일을 받아 일괄 검증합니다")
 async def file_check(inter: Interaction):
-    emb = make_embed("DM 안내", "DM으로 보낼게. DM에서 파일 올려줘!")
+    emb = make_embed("DM 안내", "DM으로 보내겠습니다. DM에서 파일 올려주세요.", color=COLOR_BLACK)
     await inter.response.send_message(embed=emb, ephemeral=True)
     try:
         dm = await inter.user.create_dm()
         await dm.send(embed=make_embed(
-            title="파일 검증(여기 DM에 업로드)",
-            desc="txt/log/csv/json/zip 지원. _|WARNING…, .ROBLOSECURITY=…, \"ROBLOSECURITY\":\"…\" 전부 인식해.\n2분 내에 파일 올려줘."
+            title="파일 검증",
+            desc="여기에 파일을 올려주세요.\n- 지원: txt / log / csv / json / zip\n- 인식: _|WARNING…, .ROBLOSECURITY=…, \"ROBLOSECURITY\":\"…\"\n- 제한: 2분 내 업로드",
+            color=COLOR_BLACK
         ))
     except Exception as e:
-        await inter.followup.send(embed=make_embed("❌ DM 실패", f"DM 허용을 켜줘! ({e})"), ephemeral=True)
+        await inter.followup.send(embed=make_embed("DM 전송 실패", f"DM 허용을 켜주세요. ({e})", color=COLOR_BLACK), ephemeral=True)
 
 if __name__ == "__main__":
     if not TOKEN:
