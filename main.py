@@ -72,15 +72,15 @@ GAME_ICON = {
 
 # 커스텀 이모지 폴백(권한/접근 문제시) — 유니코드로 교체
 GAME_ICON_FALLBACK = {
-    "grow_a_garden": "EMOJI_2",
-    "adopt_me": "EMOJI_3",
-    "brainrot": "EMOJI_4",
-    "blox_fruits": "EMOJI_5",
+    "grow_a_garden": "EMOJI_6",
+    "adopt_me": "EMOJI_7",
+    "brainrot": "EMOJI_8",
+    "blox_fruits": "EMOJI_9",
 }
 def emoji_for_game(key: str) -> str:
     e = GAME_ICON.get(key)
     if not e or not e.startswith("<"):  # 커스텀 이모지 문법이 아니면 폴백
-        return GAME_ICON_FALLBACK.get(key, "EMOJI_6")
+        return GAME_ICON_FALLBACK.get(key, "EMOJI_10")
     return e
 
 # 검증 카운트용 커스텀 이모지(총/성공/실패)
@@ -91,7 +91,7 @@ COUNT_EMO = {
 }
 def em_total():
     v = COUNT_EMO.get("total") or ""
-    return v if v.strip() else "EMOJI_7"  # 폴백 교체
+    return v if v.strip() else "EMOJI_11"  # 폴백 교체
 def em_ok():
     v = COUNT_EMO.get("ok") or ""
     return v if v.strip() else "✅"
@@ -163,26 +163,29 @@ SUPPORTED_TEXT_EXT = {".txt", ".log", ".csv", ".json"}
 SUPPORTED_ARCHIVE_EXT = {".zip"}
 
 COOKIE_PATTERNS = [
-    r"(_\|WARNING[^\s\"';]+)",
-    r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s\"';]+)",
-    r"(?i)\"ROBLOSECURITY\"\s*:\s*\"([^\"]+)\"",
-    r"(?i)Cookie:\s*[^;]*ROBLOSECURITY\s*=\s*([^\s;]+)",
+    r"(_?\|WARNING[^\s\"';]+)",                           # _|WARNING… 또는 |WARNING…
+    r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s\"';]+)",        # .ROBLOSECURITY=값
+    r"(?i)\"ROBLOSECURITY\"\s*:\s*\"([^\"]+)\"",          # "ROBLOSECURITY":"값"
+    r"(?i)Cookie:\s*[^;]*ROBLOSECURITY\s*=\s*([^\s;]+)",  # 헤더형
 ]
 
 def extract_cookie_variants(s: str):
     if not s:
         return None, None
     s = s.strip()
-    m_w = re.search(r"(_\|WARNING[^\s;]+)", s)
+    m_w = re.search(r"(_?\|WARNING[^\s;]+)", s)
     if m_w:
         token = m_w.group(1).strip()
         return token, token
     m_eq = re.search(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s;]+)", s)
     if m_eq:
         val = m_eq.group(1).strip()
-        out = val[val.find("_|WARNING"):] if "_|WARNING" in val else val
+        out = val[val.find("|WARNING"):] if "|WARNING" in val else (val[val.find("_|WARNING"):] if "_|WARNING" in val else val)
         return val, out
     if len(s) > 50 and " " not in s and "\n" not in s and "\t" not in s:
+        if "|WARNING" in s:
+            token = s[s.find("|WARNING"):]
+            return token, token
         if "_|WARNING" in s:
             token = s[s.find("_|WARNING"):]
             return token, token
@@ -194,8 +197,14 @@ def find_tokens_in_text(text: str):
     for pat in COOKIE_PATTERNS:
         for m in re.finditer(pat, text or ""):
             val = m.group(1).strip()
-            auth = val[val.find("_|WARNING"):] if "_|WARNING" in val else val
-            outv = auth if "_|WARNING" in val else val
+            auth = None
+            if "|WARNING" in val:
+                auth = val[val.find("|WARNING"):]
+            elif "_|WARNING" in val:
+                auth = val[val.find("_|WARNING"):]
+            else:
+                auth = val
+            outv = auth
             if auth not in seen:
                 seen.add(auth)
                 out.append((auth, outv))
@@ -205,10 +214,10 @@ def find_tokens_in_text(text: str):
             out.append((auth, outv))
     return out
 
-# “_|WARNING…” 최우선 추출 → 없으면 백업 패턴 사용
+# “_|WARNING/|WARNING” 최우선 추출 → 없으면 백업 패턴 사용
 def find_warning_tokens(text: str) -> list[tuple[str, str]]:
     out, seen = [], set()
-    for m in re.finditer(r"(_\|WARNING[^\s\"';]+)", text or ""):
+    for m in re.finditer(r"(_?\|WARNING[^\s\"';]+)", text or ""):
         tok = m.group(1).strip()
         if tok not in seen:
             seen.add(tok)
@@ -278,15 +287,30 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
                 return 599, {"error": f"{type(e).__name__}: {e}"}
             await asyncio.sleep(min(2 ** tries, 5) + random.random())
 
+# 인증 강화: UA 부착 + 2단계 폴백, 반환 시그니처 유지(ok, err, uid, uname)
 async def check_cookie_once(cookie_value: str):
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
     try:
         async with new_session(cookies={'.ROBLOSECURITY': cookie_value}) as s:
-            st, data = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated")
-            if st == 200 and isinstance(data, dict) and data.get("id"):
-                return True, None, int(data["id"]), data.get("name") or data.get("displayName")
-            if st in (401, 403):
+            st1, data1 = await fetch_json_with_retry(
+                s, "GET", "https://users.roblox.com/v1/users/authenticated",
+                headers={"User-Agent": UA}
+            )
+            if st1 == 200 and isinstance(data1, dict) and data1.get("id"):
+                return True, None, int(data1["id"]), data1.get("name") or data1.get("displayName")
+
+            st2, data2 = await fetch_json_with_retry(
+                s, "GET", "https://www.roblox.com/my/settings/json",
+                headers={"User-Agent": UA, "Referer": "https://www.roblox.com/"}
+            )
+            if st2 == 200 and isinstance(data2, dict) and data2.get("Name"):
+                # uid를 못 줄 수 있으므로 None 허용
+                return True, None, None, data2.get("Name")
+
+            if st1 in (401, 403) or st2 in (401, 403):
                 return False, None, None, None
-            return False, f"unexpected {st}", None, None
+            return False, f"unexpected {st1 or st2}", None, None
     except Exception as e:
         return False, f"{type(e).__name__}: {e}", None, None
 
@@ -525,7 +549,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 class TotalCheckModal(Modal, title="전체 조회"):
     cookie = TextInput(
         label="로블록스 쿠키",
-        placeholder="_|WARNING… 또는 .ROBLOSECURITY=…",
+        placeholder="|WARNING… 또는 .ROBLOSECURITY=…",
         style=TextStyle.short,
         required=True,
         max_length=4000
@@ -539,7 +563,7 @@ class TotalCheckModal(Modal, title="전체 조회"):
             pairs = parse_cookies_blob(self.cookie.value)
             if not pairs:
                 return await inter.followup.send(
-                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다. “_|WARNING…” 또는 “.ROBLOSECURITY=…” 형태로 넣어줘.", color=COLOR_BLUE),
+                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다. “|WARNING…” 또는 “.ROBLOSECURITY=…” 형태로 넣어줘.", color=COLOR_BLUE),
                     ephemeral=True
                 )
 
@@ -551,18 +575,24 @@ class TotalCheckModal(Modal, title="전체 조회"):
             for auth, _ in pairs:
                 token = _clean(auth)
                 ok, _, uid, _ = await check_cookie_once(token)
-                if ok and uid:
+                if ok:
                     valid_cookie = token
                     break
 
             if not valid_cookie:
                 return await inter.followup.send(
-                    embed=make_embed("유효하지 않은 쿠키", "붙여넣은 쿠키들로 로그인을 못 했습니다.", color=COLOR_BLUE),
+                    embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=COLOR_BLUE),
                     ephemeral=True
                 )
 
+            # 선택된 쿠키로 실제 조회 진행(UA 포함)
+            UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             async with new_session(cookies={'.ROBLOSECURITY': valid_cookie}) as s:
-                st, data = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated")
+                st, data = await fetch_json_with_retry(
+                    s, "GET", "https://users.roblox.com/v1/users/authenticated",
+                    headers={"User-Agent": UA}
+                )
                 if st != 200 or not data.get("id"):
                     return await inter.followup.send(
                         embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=COLOR_BLUE),
