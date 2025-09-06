@@ -413,7 +413,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         elapsed_chunk = time.perf_counter() - t0_chunk
         key_to_display = {cfg["key"]: disp for disp, cfg in GAMES.items()}
 
-        # 게임플레이(이모지 제거, 텍스트만)
+        # 게임플레이(텍스트만)
         order = ["grow_a_garden", "adopt_me", "brainrot", "blox_fruits"]
         pretty_lines = []
         for k in order:
@@ -454,7 +454,6 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
             value="\n".join(pretty_lines) if pretty_lines else "게임별 분류 결과 없음",
             inline=True
         )
-        # 로벅스 요약(이모지 제거, 텍스트만)
         emb.add_field(
             name="로벅스 요약",
             value="\n".join([
@@ -578,7 +577,7 @@ class DMFilePromptView(discord.ui.View):
 
         await dm.send(embed=make_embed(
             title="파일 검증",
-            desc="여기에 파일 올려줘.\n- 지원: txt/log/csv/json/zip\n- 제한: 2분 내 업로드",
+            desc="여기에 파일을 올려줘.\n- 지원: txt/log/csv/json/zip\n- 제한: 2분 내 업로드",
             color=COLOR_BASE
         ))
 
@@ -662,6 +661,7 @@ async def on_ready():
         print("[VIEW] persistent CheckView 등록 완료")
     except Exception as e:
         print("[VIEW] 등록 실패:", e)
+    print("[VER] ua=ON, auth=3step, parse=WARNING/_|WARNING, valid=ok(any), uidOnlyForEcon")
     print(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC → 로그인: {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Cookie Checker"))
 
