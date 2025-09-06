@@ -15,7 +15,7 @@ GUILD_ID = os.getenv("GUILD_ID")  # 선택
 # 표시/동작 정책
 # ========================
 MENU_PUBLIC = True
-RESULTS_EPHEMERAL = True           # 서버에서 인터랙션 응답은 에페메럴
+RESULTS_EPHEMERAL = True           # 서버 인터랙션 응답은 에페메럴
 CHUNK_SIZE = 500                   # 청크 크기(사실상 무제한)
 CONCURRENCY_AUTH = 8               # 인증 동시성
 CONCURRENCY_BADGE = 5              # 배지/판정 동시성
@@ -52,6 +52,39 @@ EMO = {"ok":"✅","warn":"⚠️","err":"❌"}
 COLOR_BLACK = discord.Color.from_rgb(0, 0, 0)
 COLOR_BLUE = discord.Color.blurple()
 COLOR_GREEN = discord.Color.green()
+
+# 커스텀 이모지(네가 준 최신)
+EM_CUSTOM = {
+    "grow": "<:emoji_20:1413786764744720436>",
+    "adopt": "<:emoji_19:1413786747921371226>",
+    "brainrot": "<:emoji_18:1413786729718218753>",
+    "blox": "<:emoji_17:1413786669001216071>",
+    "robux": "<:emoji_11:1411978635480399963>",
+}
+
+# 게임별 아이콘
+GAME_ICON = {
+    "grow_a_garden": EM_CUSTOM["grow"],
+    "adopt_me": EM_CUSTOM["adopt"],
+    "brainrot": EM_CUSTOM["brainrot"],
+    "blox_fruits": EM_CUSTOM["blox"],
+}
+
+# 숫자/시간/화폐 포맷
+def fmt_num(n: int | float) -> str:
+    try:
+        return f"{int(n):,}"
+    except:
+        try:
+            return f"{float(n):,.2f}"
+        except:
+            return str(n)
+
+def fmt_rbx(n: int | float) -> str:
+    return f"{fmt_num(n)} R$"
+
+def fmt_sec(s: float) -> str:
+    return f"{s:.2f}초"
 
 def make_embed(title: str | None = None, desc: str = "", color: discord.Color = COLOR_BLACK) -> discord.Embed:
     emb = discord.Embed(description=desc, color=color)
@@ -105,24 +138,20 @@ def extract_cookie_variants(s: str):
     if not s:
         return None, None
     s = s.strip()
-
     m_w = re.search(r"(_\|WARNING[^\s;]+)", s)
     if m_w:
         token = m_w.group(1).strip()
         return token, token
-
     m_eq = re.search(r"(?i)\.?\s*ROBLOSECURITY\s*=\s*([^\s;]+)", s)
     if m_eq:
         val = m_eq.group(1).strip()
         out = val[val.find("_|WARNING"):] if "_|WARNING" in val else val
         return val, out
-
     if len(s) > 50 and " " not in s and "\n" not in s and "\t" not in s:
         if "_|WARNING" in s:
             token = s[s.find("_|WARNING"):]
             return token, token
         return s, s
-
     return None, None
 
 def find_tokens_in_text(text: str):
@@ -141,17 +170,34 @@ def find_tokens_in_text(text: str):
             out.append((auth, outv))
     return out
 
+# “_|WARNING…” 최우선 추출 → 없으면 백업 패턴 사용
+def find_warning_tokens(text: str) -> list[tuple[str, str]]:
+    out, seen = [], set()
+    for m in re.finditer(r"(_\|WARNING[^\s\"';]+)", text or ""):
+        tok = m.group(1).strip()
+        if tok not in seen:
+            seen.add(tok)
+            out.append((tok, tok))
+    return out
+
+def extract_fallback_tokens(text: str) -> list[tuple[str, str]]:
+    return find_tokens_in_text(text or "")
+
+def parse_cookies_blob(raw: str) -> list[tuple[str, str]]:
+    primary = find_warning_tokens(raw or "")
+    if primary:
+        return primary
+    return extract_fallback_tokens(raw or "")
+
 async def extract_texts_from_attachment(att: discord.Attachment):
     name = (att.filename or "file").lower()
     data = await att.read()
     texts = []
-
     def dec(b: bytes):
         try:
             return b.decode("utf-8")
         except:
             return b.decode("utf-8", errors="ignore")
-
     if any(name.endswith(ext) for ext in SUPPORTED_ARCHIVE_EXT):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for info in zf.infolist():
@@ -165,11 +211,7 @@ async def extract_texts_from_attachment(att: discord.Attachment):
                 with zf.open(info, "r") as f:
                     texts.append(dec(f.read()))
         return texts or [dec(data)], "zip"
-
     return [dec(data)], "text"
-
-def parse_cookies_blob(raw: str):
-    return find_tokens_in_text(raw)
 
 # ========================
 # 네트워크/로직(속도 최적화)
@@ -387,40 +429,71 @@ async def handle_file_check_logic_dm(dm: discord.DMChannel, raw_text: str):
         }
         key_to_display = {cfg["key"]: disp for disp, cfg in GAMES.items()}
 
-        lines = []
-        for k, fname in fn_map.items():
-            lst = game_buckets.get(k, [])
-            if lst:
-                buf = io.BytesIO(("\n".join(lst)).encode("utf-8"))
-                files.append(discord.File(buf, filename=fname))
-            lines.append(f"- {key_to_display.get(k, k)}: {len(lst)}개")
-
-        done_cnt += len(part)
-        success = len(ok_entries)
-        fail = len(part) - success
-        desc = f"[{chunk_idx}] 처리 청크: {len(part)}개\n" + ("\n".join(lines) if lines else "게임별 분류 결과 없음")
-
+        # ───────── 임베드(보기 좋게) ─────────
         elapsed_chunk = time.perf_counter() - t0_chunk
         elapsed_total = time.perf_counter() - t0_total
 
-        emb = make_embed(
-            title=f"{EMO['ok']} 파일 검증 결과(청크 {chunk_idx})" if success else f"{EMO['err']} 파일 검증 결과(청크 {chunk_idx})",
-            desc=desc,
-            color=COLOR_BLACK
+        order = ["grow_a_garden", "adopt_me", "brainrot", "blox_fruits"]
+        pretty_lines = []
+        for k in order:
+            disp = key_to_display.get(k, k)
+            icon = GAME_ICON.get(k, "EMOJI_0")
+            cnt = len(game_buckets.get(k, []))
+            pretty_lines.append(f"{icon} {disp}: {fmt_num(cnt)}개")
+
+        desc = "\n".join([
+            f"[{chunk_idx}] 처리 청크: {fmt_num(len(part))}개",
+            "—",
+            *pretty_lines
+        ])
+
+        ok_color = discord.Color.from_rgb(0, 180, 110)
+        err_color = discord.Color.from_rgb(200, 60, 60)
+        color_pick = ok_color if len(ok_entries) > 0 else err_color
+        title_emoji = "✅" if len(ok_entries) > 0 else "❌"
+
+        emb = discord.Embed(
+            title=f"{title_emoji} 파일 검증 결과 (청크 {chunk_idx})",
+            description=desc,
+            color=color_pick
         )
-        emb.add_field(name="총 개수(누적/전체)", value=f"{done_cnt} / {total_cnt}", inline=True)
-        emb.add_field(name="로그인 성공(이번 청크)", value=str(success), inline=True)
-        emb.add_field(name="로그인 실패(이번 청크)", value=str(fail), inline=True)
-        emb.add_field(name="로벅스 보유 합계", value=f"{total_robux_sum} R$", inline=True)
-        emb.add_field(name="전체 지출 합계", value=f"{total_spend_sum} R$", inline=True)
-        emb.add_field(name="처리 시간(이번 청크)", value=f"{elapsed_chunk:.2f}초", inline=True)
-        emb.add_field(name="누적 처리 시간", value=f"{elapsed_total:.2f}초", inline=True)
+        emb.timestamp = dt.datetime.now(dt.timezone.utc)
 
+        emb.add_field(
+            name="검증 수",
+            value="\n".join([
+                f"총(누적/전체): {fmt_num(done_cnt + len(part)) if done_cnt + len(part) <= total_cnt else fmt_num(done_cnt)} / {fmt_num(total_cnt)}",
+                f"성공(이번): {fmt_num(len(ok_entries))}",
+                f"실패(이번): {fmt_num(len(part) - len(ok_entries))}",
+            ]),
+            inline=True
+        )
+
+        emb.add_field(
+            name=f"{EM_CUSTOM['robux']} 로벅스 요약",
+            value="\n".join([
+                f"보유 합계: {fmt_rbx(total_robux_sum)}",
+                f"지출 합계: {fmt_rbx(total_spend_sum)}",
+                f"잔액>0: {fmt_num(len(robux_positive_list))}개",
+            ]),
+            inline=True
+        )
+
+        rate = (len(part)) / elapsed_chunk if elapsed_chunk > 0 else 0
+        emb.add_field(
+            name="처리 시간",
+            value="\n".join([
+                f"이번 청크: {fmt_sec(elapsed_chunk)}",
+                f"누적: {fmt_sec(elapsed_total)}",
+                f"속도: {rate:.1f}개/초",
+            ]),
+            inline=False
+        )
+
+        emb.set_footer(text="Cookie Checker • DM 전용 • 안정 검증 모드")
+
+        done_cnt += len(part)
         await dm.send(embed=emb, files=files or None)
-
-    # 전체 처리 요약(선택): 원하면 아래 주석 해제
-    # total_elapsed = time.perf_counter() - t0_total
-    # await dm.send(embed=make_embed("전체 처리 완료", f"총 처리 시간: {total_elapsed:.2f}초", color=COLOR_BLACK))
 
 # ========================
 # 모달(쿠키/전체 조회) — Discord 제한 준수
@@ -431,7 +504,7 @@ class CookieModal(Modal, title="쿠키 상태"):
         placeholder="한 줄에 하나씩(_|WARNING… 또는 .ROBLOSECURITY=…)",
         style=TextStyle.paragraph,
         required=True,
-        max_length=4000  # Discord 한도
+        max_length=4000
     )
     async def on_submit(self, inter: Interaction):
         await inter.response.defer(ephemeral=RESULTS_EPHEMERAL)
@@ -457,7 +530,7 @@ class TotalCheckModal(Modal, title="전체 조회"):
         placeholder="_|WARNING… 또는 .ROBLOSECURITY=…",
         style=TextStyle.short,
         required=True,
-        max_length=4000  # Discord 한도
+        max_length=4000
     )
     async def on_submit(self, inter: Interaction):
         await inter.response.defer(ephemeral=RESULTS_EPHEMERAL)
@@ -510,24 +583,20 @@ class DMFilePromptView(discord.ui.View):
             return await inter.response.send_message(embed=make_embed("안내", "이미 진행 중입니다. DM 확인해주세요.", color=COLOR_BLACK), ephemeral=True)
         self.busy = True
 
-        # 1) DM 열기
         try:
             dm = await inter.user.create_dm()
         except Exception as e:
             self.busy = False
             return await inter.response.send_message(embed=make_embed("DM 전송 실패", f"DM 허용을 켜주세요. ({e})", color=COLOR_BLACK), ephemeral=True)
 
-        # 2) 서버 즉시 응답
         await inter.response.send_message(embed=make_embed("DM 안내", "DM 보냈습니다. DM에서 파일 올려주세요.", color=COLOR_BLACK), ephemeral=True)
 
-        # 3) DM 안내
         await dm.send(embed=make_embed(
             title="파일 검증",
             desc="여기에 파일을 올려주세요.\n- 지원: txt / log / csv / json / zip\n- 인식: _|WARNING…, .ROBLOSECURITY=…, \"ROBLOSECURITY\":\"…\"\n- 제한: 2분 내 업로드",
             color=COLOR_BLACK
         ))
 
-        # 4) DM 업로드 대기
         def check_msg(m: discord.Message):
             return (not m.author.bot) and (m.author.id == inter.user.id) and (m.channel.id == dm.id) and (len(m.attachments) > 0)
 
@@ -540,14 +609,13 @@ class DMFilePromptView(discord.ui.View):
         att = msg.attachments[0]
         await dm.send(embed=make_embed("진행 중", "파일을 받았습니다. 검증을 시작하겠습니다.", color=COLOR_BLACK))
 
-        # 5) 처리 시작
         try:
             t0 = time.perf_counter()
             texts, _ = await extract_texts_from_attachment(att)
             combined = "\n\n".join(texts)
             await handle_file_check_logic_dm(dm, combined)
             t_total = time.perf_counter() - t0
-            await dm.send(embed=make_embed("전체 처리 완료", f"총 처리 시간: {t_total:.2f}초", color=COLOR_BLACK))
+            await dm.send(embed=make_embed("전체 처리 완료", f"총 처리 시간: {fmt_sec(t_total)}", color=COLOR_BLACK))
         except Exception as e:
             await dm.send(embed=make_embed("처리 실패", f"{type(e).__name__}: {e}", color=COLOR_BLACK))
         finally:
@@ -561,17 +629,14 @@ class CheckView(View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    # 쿠키검증 → 초록, 모달 타이틀 "쿠키 상태"
     @discord.ui.button(label="쿠키검증", style=discord.ButtonStyle.success, custom_id="cookie_check_btn")
     async def b1(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(CookieModal())
 
-    # 전체조회 → 파랑, 모달 타이틀 "전체 조회"
     @discord.ui.button(label="전체조회", style=discord.ButtonStyle.primary, custom_id="total_check_btn")
     async def b2(self, inter: Interaction, button: discord.ui.Button):
         await inter.response.send_modal(TotalCheckModal())
 
-    # 파일검증 → 회색, 임베드 타이틀 "파일 검증"
     @discord.ui.button(label="파일검증", style=discord.ButtonStyle.secondary, custom_id="file_check_btn")
     async def b3(self, inter: Interaction, button: discord.ui.Button):
         emb = make_embed(
