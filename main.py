@@ -70,17 +70,17 @@ GAME_ICON = {
     "blox_fruits": EM_CUSTOM["blox"],
 }
 
-# 커스텀 이모지 폴백(권한/접근 문제시)
+# 커스텀 이모지 폴백(권한/접근 문제시) — 유니코드로 교체
 GAME_ICON_FALLBACK = {
-    "grow_a_garden": "EMOJI_0",
-    "adopt_me": "EMOJI_1",
-    "brainrot": "EMOJI_2",
-    "blox_fruits": "EMOJI_3",
+    "grow_a_garden": "EMOJI_2",
+    "adopt_me": "EMOJI_3",
+    "brainrot": "EMOJI_4",
+    "blox_fruits": "EMOJI_5",
 }
 def emoji_for_game(key: str) -> str:
     e = GAME_ICON.get(key)
     if not e or not e.startswith("<"):  # 커스텀 이모지 문법이 아니면 폴백
-        return GAME_ICON_FALLBACK.get(key, "EMOJI_4")
+        return GAME_ICON_FALLBACK.get(key, "EMOJI_6")
     return e
 
 # 검증 카운트용 커스텀 이모지(총/성공/실패)
@@ -91,7 +91,7 @@ COUNT_EMO = {
 }
 def em_total():
     v = COUNT_EMO.get("total") or ""
-    return v if v.strip() else "EMOJI_5"
+    return v if v.strip() else "EMOJI_7"  # 폴백 교체
 def em_ok():
     v = COUNT_EMO.get("ok") or ""
     return v if v.strip() else "✅"
@@ -542,9 +542,26 @@ class TotalCheckModal(Modal, title="전체 조회"):
                     embed=make_embed("입력 필요", "쿠키를 찾지 못했습니다. “_|WARNING…” 또는 “.ROBLOSECURITY=…” 형태로 넣어줘.", color=COLOR_BLUE),
                     ephemeral=True
                 )
-            cookie_token = pairs[0][0].strip()
 
-            async with new_session(cookies={'.ROBLOSECURITY': cookie_token}) as s:
+            # 여러 줄 붙여넣었을 때 '유효한 첫 쿠키' 자동 선택
+            def _clean(v: str) -> str:
+                return (v or "").replace("\u200b", "").replace("\ufeff", "").strip()
+
+            valid_cookie = None
+            for auth, _ in pairs:
+                token = _clean(auth)
+                ok, _, uid, _ = await check_cookie_once(token)
+                if ok and uid:
+                    valid_cookie = token
+                    break
+
+            if not valid_cookie:
+                return await inter.followup.send(
+                    embed=make_embed("유효하지 않은 쿠키", "붙여넣은 쿠키들로 로그인을 못 했습니다.", color=COLOR_BLUE),
+                    ephemeral=True
+                )
+
+            async with new_session(cookies={'.ROBLOSECURITY': valid_cookie}) as s:
                 st, data = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated")
                 if st != 200 or not data.get("id"):
                     return await inter.followup.send(
