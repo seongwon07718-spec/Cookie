@@ -1,4 +1,2 @@
-Flask==2.3.2
-Werkzeug==2.3.6
+discord.py==2.3.2
 requests==2.31.0
-gunicorn==20.1.0
