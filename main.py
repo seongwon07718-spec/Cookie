@@ -9,7 +9,7 @@ from queue import Queue
 import requests
 import asyncio
 
-# 환경변수로 토큰 가져오기(Zeabur에서 설정)
+# 환경변수로 토큰 가져오기(Zeabur에서 설정
 TOKEN = os.environ.get('DISCORD_TOKEN')
 
 intents = discord.Intents.default()
