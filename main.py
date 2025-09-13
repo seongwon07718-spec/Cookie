@@ -1,9 +1,25 @@
-import os, asyncio, random, string
+# main.py
+import os
+import asyncio
+import random
+import string
+import logging
+from typing import Optional
+
 import discord
 from discord import app_commands
 
-# ===== 환경변수 ====
+# optional lightweight http server for health checks (useful on Zeabur)
+from aiohttp import web
+
+# ===== 로깅 =====
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("ticketbot")
+
+# ===== 환경변수 / 파일 경로 =====
 TOKEN = os.getenv("DISCORD_TOKEN")
+DB_PATH = os.getenv("DB_PATH", "/data/ticket.db")  # Zeabur에서 /data 같은 볼륨을 마운트하는 경우 권장
+PORT = int(os.getenv("PORT", "8080"))
 
 # ===== 컬러(다크/검정 톤) =====
 COLOR_DARK = 0x0a0a0a
@@ -12,28 +28,37 @@ COLOR_WARN = 0x1d1d1d
 COLOR_SUCCESS = 0x121212
 
 # ===== 임베드 헬퍼 =====
-def eb(title, desc, color=COLOR_DARK):
+def eb(title: str, desc: str, color: int = COLOR_DARK):
     return discord.Embed(title=title, description=desc, color=color)
 
 def gen_ticket_id():
-    import string, random
     return 'TICKET-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
-# ===== Bot 준비 =====
+# ===== Intents =====
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True
+intents.members = True  # 서버 멤버 관련 권한을 쓸 경우 Discord 개발자 포털에서 활성화 필요
 
+# ===== Bot 클래스 =====
 class TicketBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.db = None  # aiosqlite 연결 핸들
+        self._web_runner: Optional[web.AppRunner] = None
 
     async def setup_hook(self):
         # DB 초기화
         import aiosqlite
-        self.db = await aiosqlite.connect('ticket.db')
+        # ensure directory exists
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except Exception:
+                log.exception("DB 경로 생성 실패")
+
+        self.db = await aiosqlite.connect(DB_PATH)
         await self.db.execute('''
         CREATE TABLE IF NOT EXISTS settings(
             guild_id TEXT PRIMARY KEY,
@@ -50,7 +75,48 @@ class TicketBot(discord.Client):
             PRIMARY KEY (guild_id, user_id)
         )''')
         await self.db.commit()
-        await self.tree.sync()
+
+        # 앱 커맨드 동기화
+        try:
+            await self.tree.sync()
+            log.info("Slash commands synced.")
+        except Exception:
+            log.exception("Slash command sync 실패")
+
+        # Zeabur 같은 환경에서 간단한 HTTP 헬스체크 서버 실행 (선택)
+        try:
+            asyncio.create_task(self._start_health_server())
+        except Exception:
+            log.exception("헬스 서버 시작 실패")
+
+    async def close(self):
+        # 종료 시 DB 닫기 & 웹 서버 정리
+        try:
+            if self.db:
+                await self.db.close()
+        except Exception:
+            log.exception("DB 닫기 실패")
+
+        if self._web_runner:
+            try:
+                await self._web_runner.cleanup()
+            except Exception:
+                log.exception("웹 러너 정리 실패")
+
+        await super().close()
+
+    async def _start_health_server(self):
+        async def handle_health(request):
+            return web.Response(text="OK")
+
+        app = web.Application()
+        app.add_routes([web.get("/", handle_health), web.get("/health", handle_health)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        self._web_runner = runner
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        log.info(f"Health server listening on 0.0.0.0:{PORT}")
 
 bot = TicketBot()
 
@@ -129,7 +195,6 @@ class TicketCreateView(discord.ui.View):
 
         ticket_id = gen_ticket_id()
         # 채널 이름: 닉네임 대신 ID 쓰고 싶으면 아래 라인 교체
-        # name = f'ticket-{ticket_id.lower()}'
         name = f'ticket-{interaction.user.name}'.lower()
         channel = await interaction.guild.create_text_channel(name=name, category=category, overwrites=overwrites)
 
@@ -206,7 +271,7 @@ class CloseConfirmView(discord.ui.View):
         try:
             closing = eb('티켓 닫힘', f'이 티켓은 {interaction.user.mention}에 의해 닫혔어. 5초 후에 채널이 삭제돼.', COLOR_SUCCESS)
             await interaction.channel.send(embed=closing)
-        except:
+        except Exception:
             pass
 
         log_channel_id = row[2] if row else None
@@ -216,10 +281,11 @@ class CloseConfirmView(discord.ui.View):
                 await log_ch.send(embed=eb('티켓 닫힘 로그', f'[{self.ticket_id}] <#{interaction.channel_id}> by {interaction.user.mention}', COLOR_ACCENT))
 
         await remove_open_ticket_by_owner(interaction.guild_id, self.owner_id)
+        # 지연 후 삭제 (채널이 없을 수 있으니 예외 처리)
         await asyncio.sleep(5)
         try:
             await interaction.channel.delete(reason='Ticket closed')
-        except:
+        except Exception:
             pass
 
     @discord.ui.button(label='취소', style=discord.ButtonStyle.secondary, custom_id='cancel_close')
@@ -336,11 +402,22 @@ async def 티켓_임베드_생성(interaction: discord.Interaction, 채널: disc
 # ===== 영속 View 등록 =====
 @bot.event
 async def on_connect():
+    # Bot 재시작/연결 시 영속 뷰 등록 (custom_id가 동일하면 상호작용 유지됨)
     bot.add_view(TicketCreateView())
     bot.add_view(SettingMenu())
+    log.info("Persistent views registered.")
+
+# ===== 에러 로그 캡쳐 (간단) =====
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    log.exception(f"Unhandled event error: {event_method}")
 
 # ===== 시작 =====
 if __name__ == '__main__':
     if not TOKEN or TOKEN.strip() == '':
         raise RuntimeError('DISCORD_TOKEN 환경변수가 비어있어. 토큰을 설정해줘.')
-    bot.run(TOKEN)
+    try:
+        log.info("Starting bot...")
+        bot.run(TOKEN)
+    except Exception:
+        log.exception("Bot 실행 중 예외 발생")
