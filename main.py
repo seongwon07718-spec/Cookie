@@ -2,7 +2,7 @@ import os, asyncio, random, string
 import discord
 from discord import app_commands
 
-# ===== 환경변수 =====
+# ===== 환경변수 ====
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # ===== 컬러(다크/검정 톤) =====
