@@ -6,7 +6,7 @@ from db import init_db, get_settings, upsert_settings, get_open_ticket, add_open
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 
-# 검정(다크) 톤 컬러 프리셋
+# 검정(다크) 톤 컬러 프리
 COLOR_DARK = 0x0a0a0a      # 거의 검정
 COLOR_ACCENT = 0x111111    # 살짝 밝은 검정
 COLOR_WARN = 0x1d1d1d      # 경고/확인용 다크
