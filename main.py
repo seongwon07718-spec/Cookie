@@ -21,7 +21,7 @@ DEFAULT_CFG = {
     "log_channel_id": os.getenv("LOG_CHANNEL_ID") or "",
     "save_transcript": (os.getenv("SAVE_TRANSCRIPT","true").lower()=="true"),
     "archive_channel_id": os.getenv("ARCHIVE_CHANNEL_ID") or "",
-    # 메인 임베드 문구
+    # 메인 임베드 문
     "embed_title": "문의하기",
     "embed_desc": "아래 버튼을 눌러 문의를 시작해주세요.",
     "embed_thumb": "",
