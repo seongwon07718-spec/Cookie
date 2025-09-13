@@ -1,4 +1,4 @@
-# main.p
+# main.py
 import os
 import asyncio
 import random
