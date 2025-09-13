@@ -1,9 +1,4 @@
-# Discord library (py-cord is compatible with discord.ui Views)
-py-cord>=2.0.0
-
-# DB 및 HTTP health server
+py-cord==2.4.0
 aiosqlite>=0.18.0
-aiohttp>=3.8.0
-
-# 로깅/유틸 (선택)
+aiohttp>=3.8.4
 python-dotenv>=0.21.0
