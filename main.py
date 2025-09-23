@@ -1,15 +1,4 @@
-import os, json, random, string, asyncio, contextlib, re, io
-from pathlib import Path
-from dotenv import load_dotenv
-import discord
-from discord.ext import commands
-
-load_dotenv()
-
-INTENTS = discord.Intents.default()
-INTENTS.guilds = True
-INTENTS.guild_messages = True
-INTENTS.message_content = False
+ent = False
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
 
 GUILD_ID = int(os.getenv("GUILD_ID"))
